@@ -1,0 +1,13 @@
+{
+    "entityId":            { "type": "keyword" },
+    "entityName":          { "type": "keyword" },
+    "userId":              { "type": "keyword" },
+    "userName":            { "type": "keyword" },
+    "userRole":            { "type": "keyword" },
+    "operation":           { "type": "keyword" },
+    "auditStatus":         { "type": "keyword" },
+    "entityBeforeChanges": { "type": "text" },
+    "entityAfterChanges":  { "type": "text" },
+    "createdOn":           { "type": "date" },
+    "updatedOn":           { "type": "date" }
+}

@@ -1,0 +1,13 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "ACS Local DB",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "acs_db",
+      "Username": "acs_user",
+      "SSLMode": "prefer"
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+        "auditId": {
+            "type": "string",
+            "prefix": "audit-",
+            "key": "Primary",
+            "keyLength": 12,
+            "description": "Server-generated primary key (audit-<12 random digits>); never sent by the client."
+        },
+        "entityId": {
+            "type": "string",
+            "description": "Primary key of the source record this audit row is about (e.g. cropVariety-000000000777)."
+        },
+        "entityName": {
+            "type": "string",
+            "description": "Catalogue the record belongs to (e.g. cropType, cropVariety)."
+        },
+        "operation": {
+            "type": "string",
+            "description": "The endpoint/operation that produced this audit row (e.g. create, draft, add, approve, review, toggle, delete, read, search)."
+        },
+        "userId": {
+            "type": "string",
+            "description": "Id of the actor who performed the action."
+        },
+        "userName": {
+            "type": "string",
+            "description": "Display name of the actor (denormalised; role is derived from the user when needed)."
+        },
+        "userRole": {
+            "type": "string",
+            "description": "Id of the actor who performed the action."
+        },
+        "auditStatus": {
+            "type": "string",
+            "description": "Resulting lifecycle state recorded by this immutable row; matches the source catalogue's status (UPPERCASE)."
+        },
+        "entityBeforeChanges": {
+            "type": "string",
+            "description": "Stringified JSON of the record BEFORE this action (\"{}\" for a create). Indexed in Elasticsearch; the client parses it."
+        },
+        "entityAfterChanges": {
+            "type": "string",
+            "description": "Stringified JSON of the record AFTER this action. Indexed in Elasticsearch; the client parses it."
+        },
+        "createdOn": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 createdOn of the SOURCE entity record (supplied by the caller), not the audit row's own time. Indexed for time filters."
+        },
+        "updatedOn": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO-8601 updatedOn of the SOURCE entity record (supplied by the caller), not the audit row's own time."
+        }
+    },
+    "required": [
+        "entityName",
+        "operation",
+        "userId",
+        "userName",
+        "userRole"
+    ]
+}
