@@ -1,0 +1,43 @@
+package com.catalogue.verg.{{service_name_lower}}.service;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.catalogue.verg.core.dto.CustomResponse;
+import com.catalogue.verg.core.dto.LifecycleRequest;
+import com.catalogue.verg.core.elasticsearch.dto.SearchCriteria;
+import org.springframework.web.multipart.MultipartFile;
+
+
+public interface {{service_name_pascal}}Service {
+
+    CustomResponse create{{service_name_pascal}}(JsonNode {{service_name_camel}}Entity);
+
+    CustomResponse update{{service_name_pascal}}(String id, JsonNode {{service_name_camel}}Entity);
+
+    // Lifecycle: create an incomplete DRAFT (relaxed validation)
+    CustomResponse draft{{service_name_pascal}}(JsonNode {{service_name_camel}}Entity);
+
+    // Lifecycle: (re-)submit a DRAFT/REWORK record for approval -> PENDING (full validation)
+    CustomResponse add{{service_name_pascal}}(String id, JsonNode {{service_name_camel}}Entity);
+
+    // Lifecycle: PENDING -> APPROVED | REJECTED | REWORK
+    CustomResponse approve{{service_name_pascal}}(LifecycleRequest request);
+
+    // Lifecycle: APPROVED -> ACTIVE(published) | REJECTED | REWORK | PENDING
+    CustomResponse review{{service_name_pascal}}(LifecycleRequest request);
+
+    // Toggle a live record between ACTIVE and INACTIVE (rejects any other status)
+    CustomResponse toggleStatus(String id);
+
+    CustomResponse search{{service_name_pascal}}(SearchCriteria searchCriteria);
+
+    CustomResponse assign{{service_name_pascal}}(JsonNode {{service_name_camel}}Entity, String token);
+
+    CustomResponse read(String id);
+
+    CustomResponse delete(String id);
+
+    CustomResponse importData(MultipartFile file);
+
+    // Drops the ES index and rebuilds it from the primary store (Postgres); skips DELETED records
+    CustomResponse loadFromPrimary{{service_name_pascal}}();
+}

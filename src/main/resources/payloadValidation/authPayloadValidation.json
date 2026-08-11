@@ -1,0 +1,16 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+        "authId": {
+            "type": "string",
+            "prefix": "auth-",
+            "key": "Primary",
+            "keyLength": 12,
+            "description": "description about authId"
+        }
+    },
+    "required": [
+        "authId"
+    ]
+}
