@@ -14,9 +14,3 @@ docker-compose.yml
 *.postman_collection.json
 *.postman_environment.json
 setup-realm.sh
-# Keycloak's own image builds from keycloak/Dockerfile with the repo root as context, so this
-# same file applies to that build too. Exclude the module's sources, but re-admit the built
-# authenticator jar — without the exception the COPY in keycloak/Dockerfile cannot see it and
-# the Keycloak build fails with "not found".
-keycloak/
-!keycloak/authenticator/target/keycloak-catalogue-authenticator.jar

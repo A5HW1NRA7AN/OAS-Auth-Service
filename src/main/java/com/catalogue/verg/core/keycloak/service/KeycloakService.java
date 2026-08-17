@@ -5,17 +5,25 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import java.util.Map;
 
 /**
- * Obtains, verifies and revokes tokens.
+ * Issues, verifies and revokes tokens, and administers the Keycloak users those tokens are for.
  *
  * <p>Tokens are verified locally against Keycloak's published signing key rather than by calling
  * Keycloak on every request. Keycloak cannot cancel an access token it has already issued, so the
  * Redis denylist is what actually makes revocation work; the Keycloak logout call only ends the
  * session and refresh token.
+ *
+ * <p>The user-administration methods speak the catalogue's {@code userId} throughout — it is the
+ * Keycloak username — so no caller ever handles a Keycloak internal id.
  */
 public interface KeycloakService {
 
-    /** Exchanges credentials for tokens. Keycloak delegates the password check to the catalogue. */
-    Map<String, Object> requestToken(String username, String password);
+    /**
+     * Issues tokens for a user Keycloak holds no credential for.
+     *
+     * <p>Takes no password: the realm's direct grant flow performs no credential check, so this
+     * TRUSTS ITS CALLER. Verifying the password is the caller's responsibility, upstream of here.
+     */
+    Map<String, Object> requestToken(String userId);
 
     /**
      * Verifies a token and returns it decoded.
@@ -36,4 +44,26 @@ public interface KeycloakService {
 
     /** Ends the Keycloak session and refresh token. Returns false on failure rather than throwing. */
     boolean logoutFromKeycloak(String refreshToken);
+
+    /**
+     * Creates or updates the Keycloak user, with no credential. Also the re-enable path.
+     *
+     * @return true when a user was created, false when an existing one was updated
+     */
+    boolean upsertUser(String userId, String orgId, String entityType, String email);
+
+    /**
+     * Disables the user and ends their Keycloak sessions.
+     *
+     * @return false if it could not be done — best-effort, because the Redis revocation is what
+     *         stops a blocked user already holding a token
+     */
+    boolean disableUser(String userId);
+
+    /**
+     * Deletes the Keycloak user.
+     *
+     * @return false when there was no such user, which is a success for an idempotent delete
+     */
+    boolean deleteUser(String userId);
 }

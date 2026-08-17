@@ -11,5 +11,9 @@ public interface AuthService {
 
     CustomResponse authTokenInvalidate(JsonNode tokenDetails);
 
+    CustomResponse authUserCreate(JsonNode userDetails);
+
     CustomResponse authUserRevoke(JsonNode userDetails);
+
+    CustomResponse authUserDelete(JsonNode userDetails);
 }

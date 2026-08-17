@@ -14,14 +14,12 @@ CLIENT="${CLIENT:-oas-auth-service}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-admin}"
 
-# How Keycloak reaches the user-catalogue. The authenticator runs INSIDE the Keycloak
-# container, so this is never plain localhost.
-#   local : the catalogue runs on the host      -> host.docker.internal:8082
-#   k8s   : the catalogue is a Service          -> http://user-catalogue:8080
-CATALOGUE_URL="${CATALOGUE_URL:-http://host.docker.internal:8082}"
-
-AUTHENTICATOR_ID="catalogue-validate-password"
 FLOW_NAME="catalogue direct grant"
+
+# The retired custom authenticator. Still referenced here only so an existing realm gets
+# repaired: once the provider jar is gone from the image, a flow that still names it fails
+# every login with an unresolvable authenticator.
+RETIRED_AUTHENTICATOR="catalogue-validate-password"
 
 GRN=$'\033[0;32m'; YEL=$'\033[0;33m'; CYN=$'\033[0;36m'; RED=$'\033[0;31m'; RST=$'\033[0m'
 step() { printf '\n%s==> %s%s\n' "$CYN" "$*" "$RST"; }
@@ -71,8 +69,9 @@ else
 fi
 
 if [ -z "$(api "$KC/admin/realms/$REALM/clients?clientId=$CLIENT" | jq -r '.[0].id // empty')" ]; then
-  # Direct Access Grants (password grant) is dev-only: it cannot do MFA or a forced
-  # password change. Turn it off in production.
+  # This is the ONLY client in the realm allowed Direct Access Grants — step 5 turns it off
+  # everywhere else. serviceAccountsEnabled gives the auth-service its own admin identity for
+  # the user CRUD in step 3, so no admin username/password ever reaches the application.
   api -X POST "$KC/admin/realms/$REALM/clients" "${J[@]}" -d "{
     \"clientId\": \"$CLIENT\",
     \"name\": \"OAS Auth Service\",
@@ -82,15 +81,26 @@ if [ -z "$(api "$KC/admin/realms/$REALM/clients?clientId=$CLIENT" | jq -r '.[0].
     \"standardFlowEnabled\": true,
     \"directAccessGrantsEnabled\": true,
     \"implicitFlowEnabled\": false,
-    \"serviceAccountsEnabled\": false,
+    \"serviceAccountsEnabled\": true,
     \"redirectUris\": [\"http://localhost:3000/*\"],
     \"webOrigins\": [\"http://localhost:3000\"]
   }" >/dev/null
   ok "created client $CLIENT"
 fi
 
-# Keycloak generates the secret; keep .env (gitignored) in step with it.
 CLIENT_UUID=$(api "$KC/admin/realms/$REALM/clients?clientId=$CLIENT" | jq -r '.[0].id')
+
+# Realms created before the service account was needed have it switched off; repair in place.
+CLIENT_JSON=$(api "$KC/admin/realms/$REALM/clients/$CLIENT_UUID")
+if [ "$(echo "$CLIENT_JSON" | jq -r '.serviceAccountsEnabled')" = "true" ]; then
+  skip "service account already enabled on $CLIENT"
+else
+  api -X PUT "$KC/admin/realms/$REALM/clients/$CLIENT_UUID" "${J[@]}" \
+    -d "$(echo "$CLIENT_JSON" | jq '.serviceAccountsEnabled = true')" >/dev/null
+  ok "enabled the service account on $CLIENT"
+fi
+
+# Keycloak generates the secret; keep .env (gitignored) in step with it.
 SECRET=$(api "$KC/admin/realms/$REALM/clients/$CLIENT_UUID/client-secret" | jq -r .value)
 ENV_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.env"
 if [ -f "$ENV_FILE" ] && grep -q "^KEYCLOAK_CLIENT_SECRET=${SECRET}$" "$ENV_FILE"; then
@@ -109,6 +119,16 @@ PROFILE=$(api "$KC/admin/realms/$REALM/users/profile")
 
 # Attributes are admin-edit-only: a user must never be able to change their own org_id and
 # read another org's data. (`label` is reserved in jq, hence the `display` parameter name.)
+#
+# email/firstName/lastName are also dropped from `required`. Keycloak declares all three as
+# required for the `user` role by default, and an incomplete profile raises a VERIFY_PROFILE
+# required action, which makes the token request fail with:
+#
+#   {"error":"invalid_grant","error_description":"Account is not fully set up"}
+#
+# — surfacing as a bare 502 with the user visibly present and enabled. These Keycloak records are
+# machine-provisioned identity shells; the real profile lives in the catalogue, and auth_user_create
+# is not obliged to supply a name. So the realm must not insist on one.
 NEW_PROFILE=$(echo "$PROFILE" | jq '
   def attr(n; display):
     {
@@ -126,6 +146,9 @@ NEW_PROFILE=$(echo "$PROFILE" | jq '
       + (if any(.attributes[]; .name == "org_id")      then [] else [attr("org_id";      "OAS organisation id")] end)
       + (if any(.attributes[]; .name == "entity_type") then [] else [attr("entity_type"; "OAS entity type")] end)
     )
+  | .attributes = [ .attributes[]
+      | if (.name == "email" or .name == "firstName" or .name == "lastName")
+        then del(.required) else . end ]
 ')
 
 api -X PUT "$KC/admin/realms/$REALM/users/profile" "${J[@]}" -d "$NEW_PROFILE" >/dev/null
@@ -209,17 +232,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------------
-step "3. Direct Grant flow -> validate passwords against the catalogue"
+step "3. Service account -> least-privilege user administration"
 # ---------------------------------------------------------------------------------
-# Only possible once the provider jar is in the image. Checked rather than assumed, so
-# this script is still useful before the jar is built.
-if ! api "$KC/admin/realms/$REALM/authentication/authenticator-providers" \
-     | jq -e --arg id "$AUTHENTICATOR_ID" '.[] | select(.id == $id)' >/dev/null; then
-  skip "provider '$AUTHENTICATOR_ID' not deployed yet — build the jar, then re-run this script"
-  printf '\n%sRealm configured (steps 1-2). Re-run after building the authenticator.%s\n' "$GRN" "$RST"
-  exit 0
-fi
+# The auth-service creates, disables and deletes Keycloak users through its OWN client's
+# service account, never through admin/admin: manage-users to write and end sessions,
+# view-users to look one up by username. Nothing more — a leaked client secret must not be
+# able to rewrite the realm.
+SA_USER_ID=$(api "$KC/admin/realms/$REALM/clients/$CLIENT_UUID/service-account-user" | jq -r '.id // empty')
+[ -n "$SA_USER_ID" ] || die "no service-account user — serviceAccountsEnabled did not take"
 
+RM_ID=$(api "$KC/admin/realms/$REALM/clients?clientId=realm-management" | jq -r '.[0].id // empty')
+[ -n "$RM_ID" ] || die "realm-management client not found in realm $REALM"
+
+grant_role() {
+  if api "$KC/admin/realms/$REALM/users/$SA_USER_ID/role-mappings/clients/$RM_ID" \
+     | jq -e --arg n "$1" '.[] | select(.name == $n)' >/dev/null 2>&1; then
+    skip "service account already has $1"
+    return
+  fi
+  REP=$(api "$KC/admin/realms/$REALM/clients/$RM_ID/roles/$1" | jq -c '{id, name}')
+  [ -n "$(echo "$REP" | jq -r '.id // empty')" ] || die "role $1 not found on realm-management"
+  api -X POST "$KC/admin/realms/$REALM/users/$SA_USER_ID/role-mappings/clients/$RM_ID" \
+    "${J[@]}" -d "[$REP]" >/dev/null
+  ok "granted $1"
+}
+grant_role manage-users
+grant_role view-users
+
+# ---------------------------------------------------------------------------------
+step "4. Direct Grant flow -> no credential check inside Keycloak"
+# ---------------------------------------------------------------------------------
+# The flow is reduced to direct-grant-validate-username: Keycloak resolves the user, enforces
+# the `enabled` flag (which is what makes auth_user_revoke stick) and issues the token. It
+# verifies no credential at all, on purpose — Keycloak holds none for these users.
+#
+# Stated plainly, because it is the security model: anyone who can reach this token endpoint
+# WITH THE CLIENT SECRET can mint a token for any username in the realm. The secret is the
+# only thing standing there, which is why step 5 exists and why neither this endpoint nor the
+# auth-service may be routed through Kong or any ingress.
 if api "$KC/admin/realms/$REALM/authentication/flows" | jq -e --arg n "$FLOW_NAME" '.[] | select(.alias == $n)' >/dev/null; then
   skip "flow '$FLOW_NAME' already exists"
 else
@@ -243,44 +293,14 @@ else
   skip "built-in password validation already removed"
 fi
 
-if [ -z "$(executions | jq -r --arg p "$AUTHENTICATOR_ID" '.[] | select(.providerId==$p) | .id')" ]; then
-  api -X POST "$KC/admin/realms/$REALM/authentication/flows/$FLOW_URI/executions/execution" \
-    "${J[@]}" -d "{\"provider\":\"$AUTHENTICATOR_ID\"}" >/dev/null
-  ok "added $AUTHENTICATOR_ID"
+# Migration, not tidiness: a realm provisioned by an earlier version still has the custom
+# authenticator wired, and the provider jar no longer exists in the image.
+OLD_EXEC=$(executions | jq -r --arg p "$RETIRED_AUTHENTICATOR" '.[] | select(.providerId==$p) | .id')
+if [ -n "$OLD_EXEC" ]; then
+  api -X DELETE "$KC/admin/realms/$REALM/authentication/executions/$OLD_EXEC" >/dev/null
+  ok "removed the retired $RETIRED_AUTHENTICATOR step"
 else
-  skip "$AUTHENTICATOR_ID already present"
-fi
-
-# Must use the FLOW-SCOPED endpoint with the full execution representation; the bare
-# /authentication/executions path returns 404 for updates.
-EXEC_INFO=$(executions | jq -c --arg p "$AUTHENTICATOR_ID" '.[] | select(.providerId==$p)')
-EXEC_ID=$(echo "$EXEC_INFO" | jq -r .id)
-api -X PUT "$KC/admin/realms/$REALM/authentication/flows/$FLOW_URI/executions" "${J[@]}" \
-  -d "$(echo "$EXEC_INFO" | jq '.requirement = "REQUIRED"')" >/dev/null
-ok "requirement REQUIRED"
-
-# A new execution is APPENDED, landing after the conditional-OTP subflow; raise it. Only
-# top-level entries count — the listing is flattened and includes subflow children.
-toplevel_index() {
-  executions | jq --arg p "$AUTHENTICATOR_ID" \
-    '[.[] | select(.level == 0)] | map(.providerId == $p) | index(true)'
-}
-for _ in 1 2 3 4 5; do
-  [ "$(toplevel_index)" = "1" ] && break
-  api -X POST "$KC/admin/realms/$REALM/authentication/executions/$EXEC_ID/raise-priority" >/dev/null
-done
-ok "positioned at top-level index $(toplevel_index) (directly after username validation)"
-
-# Point it at the catalogue.
-if [ "$(echo "$EXEC_INFO" | jq -r '.authenticationConfig // empty')" = "" ]; then
-  CFG=$(jq -n --arg u "$CATALOGUE_URL" '{alias:"catalogue-config", config:{catalogueUrl:$u, connectTimeoutMs:"2000", readTimeoutMs:"5000"}}')
-  if api -X POST "$KC/admin/realms/$REALM/authentication/executions/$EXEC_ID/config" "${J[@]}" -d "$CFG" >/dev/null; then
-    ok "configured catalogueUrl=$CATALOGUE_URL"
-  else
-    skip "config POST failed — provider falls back to its built-in default URL"
-  fi
-else
-  skip "already configured"
+  skip "no $RETIRED_AUTHENTICATOR step present"
 fi
 
 # Bind the copy as the realm's direct grant flow.
@@ -293,6 +313,60 @@ else
   ok "bound realm directGrantFlow -> $FLOW_NAME"
 fi
 
+# ---------------------------------------------------------------------------------
+step "5. Lock down every other client"
+# ---------------------------------------------------------------------------------
+# directGrantFlow is a REALM-WIDE binding, and Keycloak auto-creates a PUBLIC `admin-cli`
+# client with Direct Access Grants on in every realm. With no credential step in the flow,
+# this would mint a live token for any user with no secret and no password:
+#
+#   POST /realms/OAS/protocol/openid-connect/token
+#   grant_type=password&client_id=admin-cli&username=<any userId>
+#
+# Verified against Keycloak 26.7 — it really does issue a token. So Direct Access Grants must
+# be off on every client except ours, and asserted rather than assumed: a rebuilt realm
+# recreates admin-cli with the flag back on.
+for cid in $(api "$KC/admin/realms/$REALM/clients" | jq -r '.[] | select(.directAccessGrantsEnabled == true) | .id'); do
+  C_JSON=$(api "$KC/admin/realms/$REALM/clients/$cid")
+  C_NAME=$(echo "$C_JSON" | jq -r .clientId)
+  [ "$C_NAME" = "$CLIENT" ] && continue
+  api -X PUT "$KC/admin/realms/$REALM/clients/$cid" "${J[@]}" \
+    -d "$(echo "$C_JSON" | jq '.directAccessGrantsEnabled = false')" >/dev/null
+  ok "disabled direct access grants on $C_NAME"
+done
+
+STILL_OPEN=$(api "$KC/admin/realms/$REALM/clients" \
+  | jq -r --arg me "$CLIENT" '[.[] | select(.directAccessGrantsEnabled == true and .clientId != $me) | .clientId] | join(", ")')
+[ -z "$STILL_OPEN" ] || die "these clients can still mint tokens without a password: $STILL_OPEN"
+ok "only $CLIENT may use the direct grant"
+
+# direct-grant-validate-username resolves via findUserByNameOrEmail, so with email login on, a
+# userId that happens to equal another user's email address would resolve to the wrong user.
+REALM_JSON=$(api "$KC/admin/realms/$REALM")
+if [ "$(echo "$REALM_JSON" | jq -r '.loginWithEmailAllowed')" = "false" ]; then
+  skip "email login already disabled"
+else
+  api -X PUT "$KC/admin/realms/$REALM" "${J[@]}" \
+    -d "$(echo "$REALM_JSON" | jq '.loginWithEmailAllowed = false')" >/dev/null
+  ok "disabled email login (userId is the only login identifier)"
+fi
+
+# ---------------------------------------------------------------------------------
+step "6. Verify"
+# ---------------------------------------------------------------------------------
+# Catch a missing role or a half-applied flow here, not at the first publish.
+SA_TOKEN=$(curl -sf -X POST "$KC/realms/$REALM/protocol/openid-connect/token" \
+  -d 'grant_type=client_credentials' -d "client_id=$CLIENT" -d "client_secret=$SECRET" 2>/dev/null \
+  | jq -r '.access_token // empty' 2>/dev/null || true)
+[ -n "$SA_TOKEN" ] || die "client_credentials refused — is the service account enabled?"
+curl -sf -H "Authorization: Bearer $SA_TOKEN" "$KC/admin/realms/$REALM/users?max=1" >/dev/null \
+  || die "service account cannot read users — view-users not granted?"
+ok "service account can administer users"
+
+if executions | jq -e '.[] | select(.providerId != null and (.providerId | test("validate-password")))' >/dev/null 2>&1; then
+  die "the bound flow still contains a password validation step"
+fi
+ok "no credential check in the bound flow"
+
 printf '\n%sRealm configured.%s\n' "$GRN" "$RST"
-api "$KC/admin/realms/$REALM/authentication/flows/$(printf %s "$FLOW_NAME" | jq -sRr @uri)/executions" \
-  | jq -r '.[] | "  \(.index)  \(.displayName)  [\(.requirement)]"'
+executions | jq -r '.[] | "  \(.index)  \(.displayName)  [\(.requirement)]"'

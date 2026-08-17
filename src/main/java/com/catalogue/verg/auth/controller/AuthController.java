@@ -10,6 +10,13 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+/**
+ * The auth-service API.
+ *
+ * <p>Every endpoint here is intended for service-to-service use and none of them authenticate their
+ * caller. They must not be routed through Kong or any ingress — see the README. That matters most for
+ * {@code auth_token_create}, which currently mints a token for whatever userId it is given.
+ */
 @RestController
 @RequestMapping("/auth")
 public class AuthController {
@@ -17,7 +24,7 @@ public class AuthController {
     @Autowired
     private AuthService authService;
 
-    /** Credentials -> tokens. The password is verified by the user-catalogue, not by Keycloak. */
+    /** userId -> tokens. Verifying the password is the caller's job; see AuthServiceImpl. */
     @PostMapping("/v1/auth_token_create")
     public ResponseEntity<CustomResponse> authTokenCreate(@RequestBody JsonNode tokenDetails) {
         CustomResponse response = authService.authTokenCreate(tokenDetails);
@@ -39,12 +46,29 @@ public class AuthController {
     }
 
     /**
-     * Revokes every live token for a user. Called when an account is blocked: disabling the user
-     * upstream only stops the next login, tokens already issued keep working until they expire.
+     * Publishes a catalogue user into Keycloak, so tokens can be issued for them. Called when the
+     * record becomes ACTIVE. Idempotent, and the same call re-enables a revoked user.
+     */
+    @PostMapping("/v1/auth_user_create")
+    public ResponseEntity<CustomResponse> authUserCreate(@RequestBody JsonNode userDetails) {
+        CustomResponse response = authService.authUserCreate(userDetails);
+        return new ResponseEntity<>(response, response.getResponseCode());
+    }
+
+    /**
+     * Blocks an account: kills every live token and disables the user in Keycloak. Called on
+     * ACTIVE -> INACTIVE. Disabling alone would only stop the next login.
      */
     @PostMapping("/v1/auth_user_revoke")
     public ResponseEntity<CustomResponse> authUserRevoke(@RequestBody JsonNode userDetails) {
         CustomResponse response = authService.authUserRevoke(userDetails);
+        return new ResponseEntity<>(response, response.getResponseCode());
+    }
+
+    /** Removes the user from Keycloak and kills every token they hold. Called on delete. */
+    @PostMapping("/v1/auth_user_delete")
+    public ResponseEntity<CustomResponse> authUserDelete(@RequestBody JsonNode userDetails) {
+        CustomResponse response = authService.authUserDelete(userDetails);
         return new ResponseEntity<>(response, response.getResponseCode());
     }
 }

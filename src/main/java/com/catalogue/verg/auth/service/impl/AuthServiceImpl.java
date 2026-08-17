@@ -30,24 +30,96 @@ public class AuthServiceImpl implements AuthService {
     private KeycloakService keycloakService;
 
     /**
-     * Exchanges credentials for tokens.
+     * Issues tokens for a user that has already been authenticated elsewhere.
      *
-     * <p>Never log {@code tokenDetails} here — it contains the plaintext password.
+     * <p>Never log the result — it contains the tokens.
      */
     @Override
     public CustomResponse authTokenCreate(JsonNode tokenDetails) {
         log.info("AuthServiceImpl::authTokenCreate");
-        String username = requiredText(tokenDetails, Constants.AUTH_FIELD_USERNAME);
-        String password = requiredText(tokenDetails, Constants.AUTH_FIELD_PASSWORD);
 
-        Map<String, Object> tokens = keycloakService.requestToken(username, password);
+        // ─── Credential verification: NOT YET WIRED ────────────────────────────────────────────
+        // The user-catalogue will expose an endpoint that checks a username + password against its
+        // own bcrypt hash and answers {valid, userId, orgId, entityType} — with an identical body
+        // for unknown user, wrong password and non-ACTIVE, so nothing can be enumerated.
+        //
+        // When it exists, this method takes {username, password} again and:
+        //   1. calls that endpoint first,
+        //   2. maps valid:false             -> 401 AUTH_INVALID_CREDENTIALS,
+        //   3. maps an unreachable catalogue -> 503 (fail closed; never issue a token),
+        //   4. passes the RETURNED userId — not the submitted username — to requestToken(), so the
+        //      catalogue can accept an email as the login identifier without a change here.
+        //
+        // Until then this endpoint TRUSTS ITS CALLER COMPLETELY: it mints a token for whatever
+        // userId it is handed. It must never be routed through Kong or any ingress.
+        // See README, "Credential verification".
+        // ───────────────────────────────────────────────────────────────────────────────────────
+        String userId = requiredText(tokenDetails, Constants.AUTH_FIELD_USER_ID);
+
+        Map<String, Object> tokens = keycloakService.requestToken(userId);
         // Index the session so a later "disable this user" can find and kill it.
         indexSession(tokens);
 
         CustomResponse response = new CustomResponse();
         response.setResult(tokens);
         success(response);
-        audit("auth_token_create", username, "SUCCESS", entityTypeOf(tokens));
+        audit("auth_token_create", userId, "SUCCESS", entityTypeOf(tokens));
+        return response;
+    }
+
+    /**
+     * Publishes a catalogue user into Keycloak. Called when the record becomes ACTIVE.
+     *
+     * <p>Idempotent, and the same call re-enables a user that was previously revoked.
+     */
+    @Override
+    public CustomResponse authUserCreate(JsonNode userDetails) {
+        log.info("AuthServiceImpl::authUserCreate");
+        String userId = requiredText(userDetails, Constants.AUTH_FIELD_USER_ID);
+        // Required, not optional: a Keycloak user missing these mints tokens with a null org_id, and
+        // every downstream tenant check then silently sees "no org".
+        String orgId = requiredText(userDetails, Constants.AUTH_FIELD_ORG_ID);
+        String entityType = requiredText(userDetails, Constants.AUTH_FIELD_ENTITY_TYPE);
+        String email = optionalText(userDetails, Constants.AUTH_FIELD_EMAIL);
+
+        boolean created = keycloakService.upsertUser(userId, orgId, entityType, email);
+
+        CustomResponse response = new CustomResponse();
+        Map<String, Object> result = new HashMap<>();
+        result.put(Constants.AUTH_FIELD_USER_ID, userId);
+        result.put("created", created);
+        result.put("enabled", true);
+        response.setResult(result);
+        success(response);
+        audit("auth_user_create", userId, created ? "USER_CREATED" : "USER_UPDATED", entityType);
+        return response;
+    }
+
+    /**
+     * Removes the user from Keycloak and kills every token they are holding.
+     *
+     * <p>Revocation happens FIRST and is load-bearing: deleting a Keycloak user does not invalidate a
+     * JWT it already signed, and once the user is gone there is nothing left to enumerate sessions
+     * for. So a Redis failure must stop the delete, not follow it.
+     */
+    @Override
+    public CustomResponse authUserDelete(JsonNode userDetails) {
+        log.info("AuthServiceImpl::authUserDelete");
+        String userId = requiredText(userDetails, Constants.AUTH_FIELD_USER_ID);
+
+        keycloakService.revokeUser(userId);
+        boolean deleted = keycloakService.deleteUser(userId);
+
+        CustomResponse response = new CustomResponse();
+        Map<String, Object> result = new HashMap<>();
+        result.put(Constants.AUTH_FIELD_USER_ID, userId);
+        result.put("revoked", true);
+        // Absent in Keycloak is a success for an idempotent delete, not a 404: a caller retrying a
+        // half-finished cleanup must be able to complete it.
+        result.put("deleted", deleted);
+        response.setResult(result);
+        success(response);
+        audit("auth_user_delete", userId, deleted ? "USER_DELETED" : "USER_ABSENT", null);
         return response;
     }
 
@@ -105,17 +177,28 @@ public class AuthServiceImpl implements AuthService {
         return response;
     }
 
-    /** Revokes every live token for a user. Used when an account is blocked. */
+    /**
+     * Blocks an account: kills every live token, then disables the user in Keycloak.
+     *
+     * <p>Both halves are needed and neither is sufficient. The Redis revocation is what stops a user
+     * who is already holding a valid access token — Keycloak cannot recall one it has issued. The
+     * Keycloak disable is what makes the block outlast the denylist TTL, since otherwise the account
+     * would quietly start working again once those entries expired.
+     *
+     * <p>Revocation is load-bearing and throws; the disable is best-effort and reported in the body.
+     */
     @Override
     public CustomResponse authUserRevoke(JsonNode userDetails) {
         log.info("AuthServiceImpl::authUserRevoke");
         String userId = requiredText(userDetails, Constants.AUTH_FIELD_USER_ID);
 
         keycloakService.revokeUser(userId);
+        boolean disabled = keycloakService.disableUser(userId);
 
         Map<String, Object> result = new HashMap<>();
-        result.put("userId", userId);
+        result.put(Constants.AUTH_FIELD_USER_ID, userId);
         result.put("revoked", true);
+        result.put("keycloakDisabled", disabled ? "ok" : "failed");
 
         CustomResponse response = new CustomResponse();
         response.setResult(result);
