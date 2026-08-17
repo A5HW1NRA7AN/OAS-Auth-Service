@@ -1,0 +1,22 @@
+# Keeps the build context small and stops local state leaking into the image.
+# target/ alone is ~140MB and would otherwise be uploaded on every build.
+target/
+.git/
+.env
+*.log
+
+# Local tooling / docs — none of it is needed to build the jar.
+.idea/
+.vscode/
+.claude/
+*.md
+docker-compose.yml
+*.postman_collection.json
+*.postman_environment.json
+setup-realm.sh
+# Keycloak's own image builds from keycloak/Dockerfile with the repo root as context, so this
+# same file applies to that build too. Exclude the module's sources, but re-admit the built
+# authenticator jar — without the exception the COPY in keycloak/Dockerfile cannot see it and
+# the Keycloak build fails with "not found".
+keycloak/
+!keycloak/authenticator/target/keycloak-catalogue-authenticator.jar

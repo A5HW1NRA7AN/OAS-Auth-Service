@@ -1,0 +1,1779 @@
+{
+  "info": {
+    "_postman_id": "7c1f2a90-3b64-4a11-9d2e-0a5f6c8e41b7",
+    "name": "OAS Auth Service",
+    "description": "Auth-service (:8080), the user-catalogue (:8082) and Keycloak (:8180).\n\nThe catalogue owns users and password hashes. Keycloak stores no password at all - it calls the catalogue on every login. This service owns tokens and their revocation.\n\nFOLDERS 0-5 are for stepping through by hand. Request bodies carry literal placeholders such as PASTE_USER_ID_HERE, which you replace with values copied from the previous response. Each request description says what to copy and what to expect.\n\nFOLDER 6 is automated and self-chaining. Run it to verify the whole system in one click:\n  newman run OAS_Auth_Service.postman_collection.json \\\n    -e OAS_Auth_Service.postman_environment.json \\\n    --folder \"6. Regression (Automated)\"\n\nNote the catalogue stores password HASHES (the portal hashes before submission), so Create User sends a bcrypt hash while Token Create sends the plaintext.\n\nSelect the 'OAS Auth Service - Local' environment before running.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0. Preflight",
+      "description": "Confirms all three services are reachable before anything else is attempted. Nothing downstream can work if one of these fails, so run this folder first.\n\nThese three carry assertions and need nothing pasted.",
+      "item": [
+        {
+          "name": "Auth Service Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/actuator/health/readiness",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "actuator",
+                "health",
+                "readiness"
+              ]
+            },
+            "description": "The auth-service itself. Owns no database, so this only depends on the app being up."
+          },
+          "response": []
+        },
+        {
+          "name": "Keycloak Discovery",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('realm is OAS', () => pm.expect(b.issuer).to.eql(pm.environment.get('keycloak_url') + '/realms/OAS'));",
+                  "pm.test('password grant enabled', () => pm.expect(b.grant_types_supported).to.include('password'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{keycloak_url}}/realms/OAS/.well-known/openid-configuration",
+              "host": [
+                "{{keycloak_url}}"
+              ],
+              "path": [
+                "realms",
+                "OAS",
+                ".well-known",
+                "openid-configuration"
+              ]
+            },
+            "description": "Confirms the OAS realm exists. If this 404s, run ./setup-realm.sh."
+          },
+          "response": []
+        },
+        {
+          "name": "Catalogue Health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{catalogue_url}}/actuator/health",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "actuator",
+                "health"
+              ]
+            },
+            "description": "The user-catalogue. Keycloak calls it on every login, so login fails closed without it."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "1. User Lifecycle (catalogue side)",
+      "description": "What the user-catalogue owns. Three steps: create (PENDING) -> approve (APPROVED) -> review (ACTIVE). Only the last one touches Keycloak, and it pushes the user there BEFORE persisting ACTIVE, so a Keycloak outage cannot leave a live user who cannot log in.\n\nCopy result.userId from the first response into every request that follows.",
+      "item": [
+        {
+          "name": "Create User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/create",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Demo\",\n  \"lastName\": \"User\",\n  \"email\": \"demo.user@oas.local\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"password\": \"$2b$10$b7GKahK1oiSOiyn.N9kkDO6.uQ5AlS838Ev7yd4UUgDE7tsBytNo6\"\n}"
+            },
+            "description": "Creates a PENDING user.\n\n`password` is a bcrypt HASH, not plaintext: the catalogue's contract is that the portal hashes before submission. The hash above is for 'DemoPass#2026!'.\n\nCOPY result.userId.\n\nChange the email if you run this twice; Keycloak requires unique addresses and the publish would fail on the second attempt."
+          },
+          "response": []
+        },
+        {
+          "name": "Login Before Approval",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            },
+            "description": "Expect 401 AUTH_INVALID_CREDENTIALS.\n\nThe password is correct. The user is not published, so it does not exist in Keycloak at all - the maker-checker gate holds by construction rather than by a flag."
+          },
+          "response": []
+        },
+        {
+          "name": "Approve User",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/approve",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "approve"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"PASTE_USER_ID_HERE\",\n  \"status\": \"APPROVED\"\n}"
+            },
+            "description": "PENDING -> APPROVED. Still not in Keycloak; Login Before Approval still returns 401."
+          },
+          "response": []
+        },
+        {
+          "name": "Publish User",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/review",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "review"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"PASTE_USER_ID_HERE\",\n  \"status\": \"ACTIVE\"\n}"
+            },
+            "description": "APPROVED -> ACTIVE, and the only step that touches Keycloak.\n\nKeycloak is written first. Stop the Keycloak container and try this to see it return 502 with the record left at APPROVED."
+          },
+          "response": []
+        },
+        {
+          "name": "Read User",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/read/PASTE_USER_ID_HERE",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "read",
+                "PASTE_USER_ID_HERE"
+              ]
+            },
+            "description": "Paste the userId into the URL. Status is at result.result.status and should read ACTIVE."
+          },
+          "response": []
+        },
+        {
+          "name": "Verify Credentials",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/verify_credentials",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "verify_credentials"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            },
+            "description": "The endpoint Keycloak calls on every login. Expect valid:true plus userId, orgId, entityType.\n\nInternal only - it accepts plaintext passwords and must not be exposed through Kong."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Auth Service API",
+      "description": "The deliverable: four endpoints on :8080.\n\nThe fourth endpoint, auth_user_revoke, is exercised in folder 5 where its effect can be seen.",
+      "item": [
+        {
+          "name": "Token Create",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            },
+            "description": "Plaintext password here. Keycloak holds no credential for this user - it calls the catalogue's verify_credentials to check it.\n\nCOPY result.access_token and result.refresh_token.\n\nPaste the access token into jwt.io: user_id, org_id and entity_type all came from the catalogue."
+          },
+          "response": []
+        },
+        {
+          "name": "Token Validate",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"PASTE_ACCESS_TOKEN_HERE\"\n}"
+            },
+            "description": "Expect 200 with active:true and the catalogue identifiers.\n\nEntirely local: the signature is checked against Keycloak's published key, with no network call."
+          },
+          "response": []
+        },
+        {
+          "name": "Token Invalidate",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_invalidate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_invalidate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"PASTE_ACCESS_TOKEN_HERE\",\n  \"refreshToken\": \"PASTE_REFRESH_TOKEN_HERE\"\n}"
+            },
+            "description": "Denylists the token and its session, then ends the Keycloak session. refreshToken is optional.\n\nExpect {\"localRevocation\": \"ok\", \"idpLogout\": \"ok\"}."
+          },
+          "response": []
+        },
+        {
+          "name": "Token Validate After Invalidate",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"PASTE_ACCESS_TOKEN_HERE\"\n}"
+            },
+            "description": "Same token as before. Expect 401 AUTH_TOKEN_REVOKED.\n\nThis is the point of the Redis denylist: Keycloak cannot recall a token it already issued, so without this the token would keep working until it expired."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Credential Rejections",
+      "description": "All three return byte-identical bodies. Distinguishing them would allow username enumeration, and 'account is locked' tells an attacker their guessing is working.\n\nCompare the three responses side by side.",
+      "item": [
+        {
+          "name": "Wrong Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/verify_credentials",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "verify_credentials"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\",\n  \"password\": \"definitely-wrong\"\n}"
+            },
+            "description": "Expect {\"valid\": false}."
+          },
+          "response": []
+        },
+        {
+          "name": "Unknown User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/verify_credentials",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "verify_credentials"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"user-999999999999\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            },
+            "description": "A user id that does not exist. Identical body to Wrong Password."
+          },
+          "response": []
+        },
+        {
+          "name": "Inactive User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/verify_credentials",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "verify_credentials"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_BLOCKED_USER_ID_HERE\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            },
+            "description": "Block a user in folder 5 first, then paste its id. Correct password, still identical."
+          },
+          "response": []
+        },
+        {
+          "name": "Same Three, Through Auth Service",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\",\n  \"password\": \"definitely-wrong\"\n}"
+            },
+            "description": "The auth-service collapses them too. Expect 401 AUTH_INVALID_CREDENTIALS - identical for a wrong password, an unknown user, and a blocked account."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "4. Token Rejections",
+      "description": "Every way a token can be refused by the auth-service.",
+      "item": [
+        {
+          "name": "Refresh Token Sent To Validate",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"PASTE_REFRESH_TOKEN_HERE\"\n}"
+            },
+            "description": "Expect 401 AUTH_TOKEN_INVALID.\n\nA refresh token is signed with the same key and passes the signature, issuer and azp checks. Only the typ == Bearer check stops it being accepted as proof of identity."
+          },
+          "response": []
+        },
+        {
+          "name": "Tampered Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"PASTE_ACCESS_TOKEN_WITH_ONE_CHARACTER_CHANGED\"\n}"
+            },
+            "description": "Take a real access token and change one character in the middle section. Expect 401 AUTH_TOKEN_INVALID - the signature no longer matches."
+          },
+          "response": []
+        },
+        {
+          "name": "Malformed Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"not.a.jwt\"\n}"
+            },
+            "description": "Not a JWT at all. Expect 401 AUTH_TOKEN_INVALID, not a 500."
+          },
+          "response": []
+        },
+        {
+          "name": "Missing Token Field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "description": "Expect 400 AUTH_INVALID_REQUEST. A missing field is a bad request, not an auth failure."
+          },
+          "response": []
+        },
+        {
+          "name": "Missing Password Field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\"\n}"
+            },
+            "description": "Expect 400 AUTH_INVALID_REQUEST."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Block Lifecycle",
+      "description": "Blocking an account takes three actions, and each covers a gap the others cannot:\n\n  catalogue INACTIVE    stops new logins; tokens already issued keep working\n  Keycloak disable      ends sessions and refresh tokens; cannot recall an issued token\n  auth_user_revoke      kills tokens already in circulation\n\nThe catalogue's toggle endpoint performs all three. Run this folder last: it leaves the user blocked for 900 seconds.",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            },
+            "description": "Get a fresh token. COPY result.access_token - you will validate it after the block."
+          },
+          "response": []
+        },
+        {
+          "name": "User Revoke",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_user_revoke",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_user_revoke"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"PASTE_USER_ID_HERE\"\n}"
+            },
+            "description": "The auth-service endpoint the catalogue calls when blocking. Kills every live session for the user, including tokens issued after this call, for 900 seconds."
+          },
+          "response": []
+        },
+        {
+          "name": "Token Rejected After Revoke",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"PASTE_ACCESS_TOKEN_HERE\"\n}"
+            },
+            "description": "The token from Login. Expect 401 AUTH_TOKEN_REVOKED."
+          },
+          "response": []
+        },
+        {
+          "name": "Block User (catalogue)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/toggle/PASTE_USER_ID_HERE",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "toggle",
+                "PASTE_USER_ID_HERE"
+              ]
+            },
+            "description": "Paste the userId into the URL. Toggles ACTIVE <-> INACTIVE and performs all three actions.\n\nExpect result.status INACTIVE. The Keycloak disable and the token revocation are best-effort and are not reported in the body - the catalogue status alone already blocks every new login, so a Keycloak blip must not fail the block. The two requests that follow are what show they happened."
+          },
+          "response": []
+        },
+        {
+          "name": "New Login Rejected",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"PASTE_USER_ID_HERE\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            },
+            "description": "Expect 401 AUTH_INVALID_CREDENTIALS. The catalogue is now INACTIVE, so verify_credentials refuses and no new token is issued at all."
+          },
+          "response": []
+        },
+        {
+          "name": "Unblock User",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/toggle/PASTE_USER_ID_HERE",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "toggle",
+                "PASTE_USER_ID_HERE"
+              ]
+            },
+            "description": "Toggles back to ACTIVE. Sessions revoked above stay dead until their denylist entries expire - revocation is deliberately not undone."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "6. Regression (Automated)",
+      "description": "Self-chaining; nothing to paste. Creates its own user each run, so it is repeatable.\n\n  newman run OAS_Auth_Service.postman_collection.json \\\n    -e OAS_Auth_Service.postman_environment.json \\\n    --folder \"6. Regression (Automated)\"\n\nRequires the catalogue on :8082, Keycloak on :8180 and the auth-service on :8080.",
+      "item": [
+        {
+          "name": "Setup - Create User",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Unique per run: Keycloak enforces unique email addresses.",
+                  "pm.collectionVariables.set('rg_email', `regression-${Date.now()}@oas.local`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const u = pm.response.json().result;",
+                  "pm.test('created as PENDING', () => pm.expect(u.status).to.eql('PENDING'));",
+                  "pm.collectionVariables.set('rg_user', u.userId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/create",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Regression\",\n  \"lastName\": \"Run\",\n  \"email\": \"{{rg_email}}\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"password\": \"{{pw_hash}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Setup - PENDING Cannot Log In",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 - not published yet', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_INVALID_CREDENTIALS', () => pm.expect(pm.response.json().code).to.eql('AUTH_INVALID_CREDENTIALS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Setup - Approve",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('APPROVED', () => pm.expect(pm.response.json().result.status).to.eql('APPROVED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/approve",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "approve"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{rg_user}}\",\n  \"status\": \"APPROVED\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Setup - Publish",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Keycloak is written before this status is persisted; a 502 here would mean the push",
+                  "// failed and the record correctly stayed APPROVED.",
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('ACTIVE', () => pm.expect(pm.response.json().result.status).to.eql('ACTIVE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/review",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "review"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{rg_user}}\",\n  \"status\": \"ACTIVE\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Verify Credentials",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json().result;",
+                  "pm.test('valid', () => pm.expect(r.valid).to.eql(true));",
+                  "pm.test('returns catalogue identifiers', () => {",
+                  "  pm.expect(r.userId).to.eql(pm.collectionVariables.get('rg_user'));",
+                  "  pm.expect(r.orgId).to.eql('org-000000000001');",
+                  "  pm.expect(r.entityType).to.eql('MAKER');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/verify_credentials",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "verify_credentials"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Verify Wrong Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('not valid', () => pm.expect(pm.response.json().result.valid).to.eql(false));",
+                  "pm.collectionVariables.set('rg_cat_reject', pm.response.text());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/verify_credentials",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "verify_credentials"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\",\n  \"password\": \"wrong-password\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Verify Unknown User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('body identical to a wrong password', () =>",
+                  "  pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get('rg_cat_reject')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/verify_credentials",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "verify_credentials"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"user-999999999999\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Token Create",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json().result;",
+                  "pm.collectionVariables.set('rg_access', r.access_token);",
+                  "pm.collectionVariables.set('rg_refresh', r.refresh_token);",
+                  "const p = JSON.parse(atob(r.access_token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));",
+                  "pm.test('typ is Bearer', () => pm.expect(p.typ).to.eql('Bearer'));",
+                  "pm.test('azp is this client', () => pm.expect(p.azp).to.eql('oas-auth-service'));",
+                  "pm.test('iss matches the realm', () => pm.expect(p.iss).to.eql(pm.environment.get('keycloak_url') + '/realms/OAS'));",
+                  "pm.test('claims came from the catalogue', () => {",
+                  "  pm.expect(p.user_id).to.eql(pm.collectionVariables.get('rg_user'));",
+                  "  pm.expect(p.org_id).to.eql('org-000000000001');",
+                  "  pm.expect(p.entity_type).to.eql('MAKER');",
+                  "});",
+                  "pm.test('aud includes this client (needed for introspection)', () =>",
+                  "  pm.expect([].concat(p.aud)).to.include('oas-auth-service'));",
+                  "pm.test('has jti and sid', () => { pm.expect(p.jti).to.be.a('string'); pm.expect(p.sid).to.be.a('string'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Token Validate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json().result;",
+                  "pm.test('active', () => pm.expect(r.active).to.eql(true));",
+                  "pm.test('returns catalogue identity', () => pm.expect(r.user_id).to.eql(pm.collectionVariables.get('rg_user')));",
+                  "pm.test('token is not echoed back', () =>",
+                  "  pm.expect(pm.response.text()).to.not.include(pm.collectionVariables.get('rg_access')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{rg_access}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Refresh Token Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_TOKEN_INVALID', () => pm.expect(pm.response.json().code).to.eql('AUTH_TOKEN_INVALID'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{rg_refresh}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Tampered Token Rejected",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Tamper the FIRST signature character. The last one carries only 2 significant bits",
+                  "// of an RSA-2048 signature and often decodes identically, which made this flaky.",
+                  "const parts = pm.collectionVariables.get('rg_access').split('.');",
+                  "parts[2] = (parts[2][0] === 'A' ? 'B' : 'A') + parts[2].slice(1);",
+                  "pm.collectionVariables.set('rg_tampered', parts.join('.'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_TOKEN_INVALID', () => pm.expect(pm.response.json().code).to.eql('AUTH_TOKEN_INVALID'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{rg_tampered}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Malformed Token Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_TOKEN_INVALID', () => pm.expect(pm.response.json().code).to.eql('AUTH_TOKEN_INVALID'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"not.a.jwt\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Missing Field Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
+                  "pm.test('AUTH_INVALID_REQUEST', () => pm.expect(pm.response.json().code).to.eql('AUTH_INVALID_REQUEST'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Invalid Password Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_INVALID_CREDENTIALS', () => pm.expect(pm.response.json().code).to.eql('AUTH_INVALID_CREDENTIALS'));",
+                  "pm.collectionVariables.set('rg_fail_body', pm.response.text());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\",\n  \"password\": \"wrong-password\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Unknown User Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('body identical to a wrong password', () =>",
+                  "  pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get('rg_fail_body')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"user-999999999999\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Token Invalidate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json().result;",
+                  "pm.test('local revocation ok', () => pm.expect(r.localRevocation).to.eql('ok'));",
+                  "pm.test('Keycloak session ended', () => pm.expect(r.idpLogout).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_invalidate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_invalidate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{rg_access}}\",\n  \"refreshToken\": \"{{rg_refresh}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Invalidated Token Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Without the Redis denylist this returns 200 and invalidation is a lie.",
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_TOKEN_REVOKED', () => pm.expect(pm.response.json().code).to.eql('AUTH_TOKEN_REVOKED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{rg_access}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Block - Log In Again",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('rg_access2', pm.response.json().result.access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Block User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('catalogue status INACTIVE', () => pm.expect(pm.response.json().result.status).to.eql('INACTIVE'));",
+                  "// The Keycloak disable and the auth_user_revoke call are deliberately best-effort and are not",
+                  "// reported in this body - the catalogue status alone already blocks every new login, so a",
+                  "// Keycloak blip must not fail the block. The next two requests are what prove they happened."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{catalogue_url}}/user/v1/toggle/{{rg_user}}",
+              "host": [
+                "{{catalogue_url}}"
+              ],
+              "path": [
+                "user",
+                "v1",
+                "toggle",
+                "{{rg_user}}"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Blocked Token Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_TOKEN_REVOKED', () => pm.expect(pm.response.json().code).to.eql('AUTH_TOKEN_REVOKED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_validate",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_validate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{rg_access2}}\"\n}"
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Blocked Login Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 Unauthorized', () => pm.response.to.have.status(401));",
+                  "pm.test('AUTH_INVALID_CREDENTIALS', () => pm.expect(pm.response.json().code).to.eql('AUTH_INVALID_CREDENTIALS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/auth/v1/auth_token_create",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "auth",
+                "v1",
+                "auth_token_create"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{rg_user}}\",\n  \"password\": \"DemoPass#2026!\"\n}"
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "pw_hash",
+      "value": "$2b$10$b7GKahK1oiSOiyn.N9kkDO6.uQ5AlS838Ev7yd4UUgDE7tsBytNo6"
+    },
+    {
+      "key": "rg_user",
+      "value": ""
+    },
+    {
+      "key": "rg_email",
+      "value": ""
+    },
+    {
+      "key": "rg_access",
+      "value": ""
+    },
+    {
+      "key": "rg_refresh",
+      "value": ""
+    },
+    {
+      "key": "rg_access2",
+      "value": ""
+    },
+    {
+      "key": "rg_tampered",
+      "value": ""
+    },
+    {
+      "key": "rg_cat_reject",
+      "value": ""
+    },
+    {
+      "key": "rg_fail_body",
+      "value": ""
+    }
+  ]
+}

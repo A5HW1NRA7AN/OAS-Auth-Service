@@ -121,3 +121,12 @@ LEARNING-PATH.md
 
 #===== pem files ====
 *.pem
+
+#===== secrets ====
+# Holds KEYCLOAK_CLIENT_SECRET; never commit it
+.env
+
+#===== working notes and drafts ====
+# README.md is the single tracked document; everything else stays local.
+*.md
+!README.md
