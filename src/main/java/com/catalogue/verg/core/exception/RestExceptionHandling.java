@@ -22,7 +22,12 @@ public class RestExceptionHandling {
             // Check if the CustomException provides an HTTP status code
             if (CustomException != null) {
                 try {
-                    status = CustomException.getHttpStatusCode();
+                    // Guard against null: a CustomException built without a status would otherwise
+                    // reach `new ResponseEntity<>(body, null)` below, which throws and turns a
+                    // handled error into an opaque 500.
+                    if (CustomException.getHttpStatusCode() != null) {
+                        status = CustomException.getHttpStatusCode();
+                    }
                 } catch (IllegalArgumentException e) {
                     log.warn("Invalid HTTP status code provided in CustomException: " + CustomException.getHttpStatusCode());
                 }

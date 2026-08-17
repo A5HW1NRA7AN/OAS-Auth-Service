@@ -1,0 +1,3 @@
+# Registers the provider with Keycloak. Without this file the jar loads and is silently
+# ignored — the provider simply never appears in the authenticator list.
+com.catalogue.verg.keycloak.CatalogueAuthenticator

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Keycloak provider that validates passwords against the OAS user-catalogue instead of
+  against Keycloak's own credential store.
+
+  Built separately from the auth-service: this jar is deployed INTO Keycloak
+  (/opt/keycloak/providers/), not onto the application classpath. It has no Spring on it
+  and shares nothing with the service.
+
+  Every Keycloak dependency is `provided` — the server supplies them at runtime, and
+  bundling them would cause classloader conflicts.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.catalogue.verg</groupId>
+    <artifactId>keycloak-catalogue-authenticator</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>OAS Keycloak Catalogue Authenticator</name>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Must match the Keycloak in docker-compose.yml. -->
+        <keycloak.version>26.7.0</keycloak.version>
+        <!-- Keycloak 26 runs on Java 21; targeting 17 is forward-compatible. -->
+        <maven.compiler.release>17</maven.compiler.release>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-server-spi</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-server-spi-private</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- AbstractDirectGrantAuthenticator and the Errors constants live here. -->
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-services</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <!--
+            Declared explicitly rather than relied on transitively via keycloak-services.
+            This class imports org.keycloak.Config and CredentialRepresentation (core) and
+            org.jboss.logging.Logger directly, so they belong here — a transitive that
+            disappears in a future Keycloak release would otherwise break the build for a
+            non-obvious reason.
+        -->
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-core</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.logging</groupId>
+            <artifactId>jboss-logging</artifactId>
+            <version>3.5.3.Final</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.ws.rs</groupId>
+            <artifactId>jakarta.ws.rs-api</artifactId>
+            <version>3.1.0</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>keycloak-catalogue-authenticator</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

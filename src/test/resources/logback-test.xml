@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test-only logging.
+
+  Several tests deliberately drive the failure paths — Redis down, Keycloak unreachable — and
+  KeycloakService logs those at ERROR with a full stack trace, which is correct in production
+  but prints ~80 lines of noise during a green build and makes a passing run look broken.
+
+  Silenced here only; production logging is untouched.
+-->
+<configuration>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="com.catalogue.verg.core.keycloak.service.KeycloakServiceImpl" level="OFF"/>
+
+    <root level="WARN">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>
