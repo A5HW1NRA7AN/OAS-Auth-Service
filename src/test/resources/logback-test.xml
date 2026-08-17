@@ -17,6 +17,12 @@
 
     <logger name="com.catalogue.verg.core.keycloak.service.KeycloakServiceImpl" level="OFF"/>
 
+    <!--
+      AuthServiceImpl warns when it cannot index a session, which every service-layer test triggers:
+      the mocked token is not a real JWT, so the best-effort decode fails by design.
+    -->
+    <logger name="com.catalogue.verg.auth.service.impl.AuthServiceImpl" level="OFF"/>
+
     <root level="WARN">
         <appender-ref ref="CONSOLE"/>
     </root>

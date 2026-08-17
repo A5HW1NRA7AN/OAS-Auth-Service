@@ -15,19 +15,16 @@ public final class Constants {
 
     public static final String SUCCESS = "success";
 
-    // Token endpoint request fields
-    public static final String AUTH_FIELD_USERNAME = "username";
-    public static final String AUTH_FIELD_PASSWORD = "password";
+    // Request fields. There is no password field: no endpoint here accepts a credential.
     public static final String AUTH_FIELD_TOKEN = "token";
     public static final String AUTH_FIELD_REFRESH_TOKEN = "refreshToken";
     public static final String AUTH_FIELD_USER_ID = "userId";
+    public static final String AUTH_FIELD_ORG_ID = "orgId";
+    public static final String AUTH_FIELD_ENTITY_TYPE = "entityType";
+    public static final String AUTH_FIELD_EMAIL = "email";
 
     public static final String AUTH_INVALID_REQUEST = "AUTH_INVALID_REQUEST";
     public static final String AUTH_INVALID_REQUEST_MSG = "Request is missing a required field";
-
-    /** Deliberately identical for wrong password, unknown user and disabled account. */
-    public static final String AUTH_INVALID_CREDENTIALS = "AUTH_INVALID_CREDENTIALS";
-    public static final String AUTH_INVALID_CREDENTIALS_MSG = "Invalid credentials";
 
     public static final String AUTH_TOKEN_INVALID = "AUTH_TOKEN_INVALID";
     public static final String AUTH_TOKEN_INVALID_MSG = "Token is not valid";
@@ -43,4 +40,20 @@ public final class Constants {
 
     public static final String AUTH_REVOCATION_FAILED = "AUTH_REVOCATION_FAILED";
     public static final String AUTH_REVOCATION_FAILED_MSG = "Unable to complete revocation";
+
+    /** The publish never reached us — the caller should call auth_user_create. */
+    public static final String AUTH_USER_NOT_FOUND = "AUTH_USER_NOT_FOUND";
+    public static final String AUTH_USER_NOT_FOUND_MSG = "User is not provisioned in the identity provider";
+
+    /** Blocked in the identity provider. auth_user_create re-enables. */
+    public static final String AUTH_USER_DISABLED = "AUTH_USER_DISABLED";
+    public static final String AUTH_USER_DISABLED_MSG = "User is disabled in the identity provider";
+
+    /** A different identity already holds these details, so retrying will not help. */
+    public static final String AUTH_USER_CONFLICT = "AUTH_USER_CONFLICT";
+    public static final String AUTH_USER_CONFLICT_MSG = "Another user already holds these details";
+
+    /** Configuration problem rather than a transient one — alert, do not retry in a loop. */
+    public static final String AUTH_IDP_OPERATION_FAILED = "AUTH_IDP_OPERATION_FAILED";
+    public static final String AUTH_IDP_OPERATION_FAILED_MSG = "Identity provider rejected the request";
 }

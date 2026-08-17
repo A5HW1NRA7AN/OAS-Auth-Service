@@ -76,8 +76,8 @@ class KeycloakServiceImplTest {
     private org.springframework.data.redis.core.SetOperations<String, String> setOperations;
 
     /**
-     * The service builds its own RestTemplate in @PostConstruct (the shared bean has no timeouts),
-     * so the mock is injected by reflection instead of by the constructor.
+     * Collaborators are field-injected in production, so they are set by reflection here rather than
+     * through a constructor.
      */
     @Mock
     private org.springframework.web.client.RestTemplate restTemplate;

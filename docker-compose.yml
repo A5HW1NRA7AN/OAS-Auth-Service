@@ -9,13 +9,10 @@ services:
       - redisdata:/data
 
   keycloak:
-    # Built rather than pulled, so the catalogue password authenticator is baked in.
-    # Rebuild with: docker compose up -d --build keycloak
-    # (after `mvn -f keycloak/authenticator/pom.xml package`)
-    build:
-      context: .
-      dockerfile: keycloak/Dockerfile
-    image: acs-auth-keycloak:26.7
+    # Stock image, no custom build. Keycloak holds no credentials and runs no custom provider:
+    # it resolves the user, enforces the enabled flag, and issues the token. Password
+    # verification is the caller's job, upstream of this service entirely.
+    image: quay.io/keycloak/keycloak:26.7
     container_name: acs-auth-keycloak
     command: start-dev
     environment:
