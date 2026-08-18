@@ -15,6 +15,12 @@ Spring Boot 3.3.5, Java 17, no database of its own.
 > is for service-to-service use inside the cluster and none may be routed through Kong or any ingress.
 > See [§4](#4-credential-verification-not-yet-wired) and [§6](#6-security-posture).
 
+> **⚠️ TEMPORARY (UAT):** for a limited UAT integration window this service **is** exposed through Kong
+> at the shared nginx host (`/auth/v1/*`), gated only by the existing catalogue API keys — no real
+> caller authentication. This deliberately relaxes the "never routed through Kong" rule above and
+> **must be reverted to strictly private before prod** — see the revert checklist in the OAS-Infra repo
+> (`kong/kong.decK.yaml`, block marked `TEMP/UAT`).
+
 ## Contents
 
 1. [Architecture](#1-architecture)

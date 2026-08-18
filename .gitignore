@@ -126,6 +126,13 @@ LEARNING-PATH.md
 # Holds KEYCLOAK_CLIENT_SECRET; never commit it
 .env
 
+#===== postman (local) ====
+# The tracked, self-contained collection lives in postman/ (no environment needed).
+# These root copies + the local environment stay local-only. Anchored to the repo
+# root with a leading slash so postman/ is NOT ignored.
+/OAS_Auth_Service.postman_collection.json
+/OAS_Auth_Service.postman_environment.json
+
 #===== working notes and drafts ====
 # README.md is the single tracked document; everything else stays local.
 *.md
