@@ -105,6 +105,16 @@ class KeycloakServiceImplAdminTest {
         return "[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":" + enabled + "}]";
     }
 
+    /** An existing user that already holds registries, for the carry-forward tests. */
+    private String existingUserWithRegistries(String... registries) {
+        StringBuilder array = new StringBuilder();
+        for (String registry : registries) {
+            array.append(array.length() == 0 ? "" : ",").append('"').append(registry).append('"');
+        }
+        return "[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":true,"
+                + "\"attributes\":{\"registries\":[" + array + "]}}]";
+    }
+
     private JsonNode capturedBody(HttpMethod method, String urlFragment) throws Exception {
         ArgumentCaptor<HttpEntity> captor = ArgumentCaptor.forClass(HttpEntity.class);
         verify(restTemplate).exchange(contains(urlFragment), eq(method), captor.capture(), eq(String.class));
@@ -118,8 +128,8 @@ class KeycloakServiceImplAdminTest {
     void adminTokenIsFetchedOnceAndReused() {
         stubUserLookup(existingUser(true));
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null);
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null);
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
 
         verify(restTemplate, times(1))
                 .exchange(contains("/protocol/openid-connect/token"), eq(HttpMethod.POST), any(), eq(Map.class));
@@ -133,8 +143,8 @@ class KeycloakServiceImplAdminTest {
         stubAdminToken(5);
         stubUserLookup(existingUser(true));
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null);
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null);
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
 
         // Four, not two: each upsert authorises two admin requests (the lookup and the write), and
         // with nothing cacheable each one fetches its own token. Contrast
@@ -151,7 +161,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.UNAUTHORIZED, "unauthorized",
                         null, null, null));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null))
+        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null))
                 .isInstanceOf(CustomException.class);
 
         assertThat(ReflectionTestUtils.getField(service, "adminAccessTokenExpiresAt"))
@@ -180,7 +190,7 @@ class KeycloakServiceImplAdminTest {
     void upsertCreatesWhenAbsent() throws Exception {
         stubUserLookup("[]");
 
-        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "a@b.example")).isTrue();
+        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "a@b.example", null, null, null)).isTrue();
 
         JsonNode body = capturedBody(HttpMethod.POST, "/users");
         assertThat(body.path("username").asText()).isEqualTo(USER_ID);
@@ -198,7 +208,7 @@ class KeycloakServiceImplAdminTest {
     void upsertUpdatesAndReEnables() throws Exception {
         stubUserLookup(existingUser(false));
 
-        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null)).isFalse();
+        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null)).isFalse();
 
         JsonNode body = capturedBody(HttpMethod.PUT, "/users/" + KC_ID);
         assertThat(body.path("enabled").asBoolean()).isTrue();
@@ -212,7 +222,7 @@ class KeycloakServiceImplAdminTest {
         // Without this a republish reports success while every login fails until the TTL expires.
         stubUserLookup(existingUser(false));
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null);
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
 
         verify(stringRedisTemplate).delete("auth:denylist:user:" + USER_ID);
     }
@@ -225,7 +235,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.CONFLICT, "conflict",
                         null, null, null));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "taken@b.example"))
+        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "taken@b.example", null, null, null))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_USER_CONFLICT)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.CONFLICT);
@@ -247,7 +257,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.CONFLICT, "conflict",
                         null, null, null));
 
-        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null)).isFalse();
+        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null)).isFalse();
         verify(restTemplate).exchange(contains("/users/" + KC_ID), eq(HttpMethod.PUT), any(), eq(String.class));
     }
 
@@ -258,7 +268,7 @@ class KeycloakServiceImplAdminTest {
         when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(), eq(String.class)))
                 .thenThrow(new ResourceAccessException("connection refused"));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null))
+        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.SERVICE_UNAVAILABLE);
@@ -272,7 +282,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.FORBIDDEN, "forbidden",
                         null, null, null));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null))
+        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_IDP_OPERATION_FAILED);
     }
@@ -421,5 +431,83 @@ class KeycloakServiceImplAdminTest {
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_IDP_OPERATION_FAILED)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.BAD_GATEWAY);
+    }
+
+    // ── registries and the profile fields ──────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("create sends firstName, lastName and registries as a real array")
+    void upsertCreatesWithNamesAndRegistries() throws Exception {
+        stubUserLookup("[]");
+
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "a@b.example", "Asha", "Rao",
+                java.util.List.of("reg-a", "reg-b"));
+
+        JsonNode body = capturedBody(HttpMethod.POST, "/users");
+        assertThat(body.path("firstName").asText()).isEqualTo("Asha");
+        assertThat(body.path("lastName").asText()).isEqualTo("Rao");
+        JsonNode registries = body.path("attributes").path("registries");
+        assertThat(registries.isArray()).isTrue();
+        assertThat(registries).hasSize(2);
+        assertThat(registries.get(0).asText()).isEqualTo("reg-a");
+        assertThat(registries.get(1).asText()).isEqualTo("reg-b");
+    }
+
+    @Test
+    @DisplayName("an update that omits registries carries the existing values forward")
+    void updateOmittingRegistriesCarriesThemForward() throws Exception {
+        // A Keycloak PUT that omits a key DELETES it, so "not mentioned" must mean "keep".
+        stubUserLookup(existingUserWithRegistries("old-1", "old-2"));
+
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+
+        JsonNode registries = capturedBody(HttpMethod.PUT, "/users/" + KC_ID)
+                .path("attributes").path("registries");
+        assertThat(registries).hasSize(2);
+        assertThat(registries.get(0).asText()).isEqualTo("old-1");
+        assertThat(registries.get(1).asText()).isEqualTo("old-2");
+    }
+
+    @Test
+    @DisplayName("an update with a new list replaces the old one")
+    void updateWithNewRegistriesReplaces() throws Exception {
+        stubUserLookup(existingUserWithRegistries("old-1", "old-2"));
+
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null,
+                java.util.List.of("new-1"));
+
+        JsonNode registries = capturedBody(HttpMethod.PUT, "/users/" + KC_ID)
+                .path("attributes").path("registries");
+        assertThat(registries).hasSize(1);
+        assertThat(registries.get(0).asText()).isEqualTo("new-1");
+    }
+
+    @Test
+    @DisplayName("an empty list clears registries by omitting the key, which is how Keycloak deletes")
+    void updateWithEmptyRegistriesClearsThem() throws Exception {
+        stubUserLookup(existingUserWithRegistries("old-1"));
+
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, java.util.List.of());
+
+        JsonNode attributes = capturedBody(HttpMethod.PUT, "/users/" + KC_ID).path("attributes");
+        assertThat(attributes.has("registries")).isFalse();
+        // The other three must survive the clear.
+        assertThat(attributes.path("user_id").get(0).asText()).isEqualTo(USER_ID);
+        assertThat(attributes.path("org_id").get(0).asText()).isEqualTo(ORG_ID);
+    }
+
+    @Test
+    @DisplayName("an update that omits firstName and lastName carries those forward too")
+    void updateOmittingNamesCarriesThemForward() throws Exception {
+        // Verified: omitting a top-level field in a PUT nulls it, so these need carrying forward too.
+        stubUserLookup("[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":true,"
+                + "\"firstName\":\"Asha\",\"lastName\":\"Rao\",\"email\":\"a@b.example\"}]");
+
+        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+
+        JsonNode body = capturedBody(HttpMethod.PUT, "/users/" + KC_ID);
+        assertThat(body.path("firstName").asText()).isEqualTo("Asha");
+        assertThat(body.path("lastName").asText()).isEqualTo("Rao");
+        assertThat(body.path("email").asText()).isEqualTo("a@b.example");
     }
 }

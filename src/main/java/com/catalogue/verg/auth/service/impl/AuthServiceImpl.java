@@ -3,11 +3,13 @@ package com.catalogue.verg.auth.service.impl;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.catalogue.verg.auth.service.AuthService;
+import com.catalogue.verg.core.catalogue.service.CatalogueService;
 import com.catalogue.verg.core.dto.CustomResponse;
 import com.catalogue.verg.core.dto.RespParam;
 import com.catalogue.verg.core.exception.CustomException;
 import com.catalogue.verg.core.keycloak.service.KeycloakService;
 import com.catalogue.verg.core.util.Constants;
+import com.catalogue.verg.core.util.VergProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -15,7 +17,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Service
@@ -29,32 +33,30 @@ public class AuthServiceImpl implements AuthService {
     @Autowired
     private KeycloakService keycloakService;
 
+    @Autowired
+    private CatalogueService catalogueService;
+
+    @Autowired
+    private VergProperties vergProperties;
+
     /**
-     * Issues tokens for a user that has already been authenticated elsewhere.
-     *
-     * <p>Never log the result — it contains the tokens.
+     * Issues tokens. {@code catalogue.validate-enabled} false (default) takes {@code {userId}} and
+     * trusts the caller; true takes {@code {username, password}}, verified by the catalogue.
+     * Never log the request (a password when verified) or the result (the tokens).
      */
     @Override
     public CustomResponse authTokenCreate(JsonNode tokenDetails) {
-        log.info("AuthServiceImpl::authTokenCreate");
+        boolean verified = vergProperties.isCatalogueValidateEnabled();
+        // The flag is otherwise silent: anything Spring does not read as true means false.
+        log.info("AuthServiceImpl::authTokenCreate mode={}", verified ? "VERIFIED" : "TRUSTED");
 
-        // ─── Credential verification: NOT YET WIRED ────────────────────────────────────────────
-        // The user-catalogue will expose an endpoint that checks a username + password against its
-        // own bcrypt hash and answers {valid, userId, orgId, entityType} — with an identical body
-        // for unknown user, wrong password and non-ACTIVE, so nothing can be enumerated.
-        //
-        // When it exists, this method takes {username, password} again and:
-        //   1. calls that endpoint first,
-        //   2. maps valid:false             -> 401 AUTH_INVALID_CREDENTIALS,
-        //   3. maps an unreachable catalogue -> 503 (fail closed; never issue a token),
-        //   4. passes the RETURNED userId — not the submitted username — to requestToken(), so the
-        //      catalogue can accept an email as the login identifier without a change here.
-        //
-        // Until then this endpoint TRUSTS ITS CALLER COMPLETELY: it mints a token for whatever
-        // userId it is handed. It must never be routed through Kong or any ingress.
-        // See README, "Credential verification".
-        // ───────────────────────────────────────────────────────────────────────────────────────
-        String userId = requiredText(tokenDetails, Constants.AUTH_FIELD_USER_ID);
+        // Flag, not body shape: sniffing would let a caller downgrade by sending {userId}.
+        // In verified mode a body userId is ignored.
+        String userId = verified
+                ? catalogueService.verifyCredentials(
+                        requiredText(tokenDetails, Constants.AUTH_FIELD_USERNAME),
+                        requiredText(tokenDetails, Constants.AUTH_FIELD_PASSWORD))
+                : requiredText(tokenDetails, Constants.AUTH_FIELD_USER_ID);
 
         Map<String, Object> tokens = keycloakService.requestToken(userId);
         // Index the session so a later "disable this user" can find and kill it.
@@ -63,14 +65,17 @@ public class AuthServiceImpl implements AuthService {
         CustomResponse response = new CustomResponse();
         response.setResult(tokens);
         success(response);
-        audit("auth_token_create", userId, "SUCCESS", entityTypeOf(tokens));
+        // The outcome names the path, so the audit trail shows whether the password was checked.
+        audit("auth_token_create", userId, verified ? "SUCCESS" : "SUCCESS_UNVERIFIED",
+                entityTypeOf(tokens));
         return response;
     }
 
     /**
      * Publishes a catalogue user into Keycloak. Called when the record becomes ACTIVE.
      *
-     * <p>Idempotent, and the same call re-enables a user that was previously revoked.
+     * <p>Idempotent, and also the re-enable path. Optional fields are carried forward when omitted;
+     * {@code registries} is three-state (absent keeps, {@code []} clears, non-empty replaces).
      */
     @Override
     public CustomResponse authUserCreate(JsonNode userDetails) {
@@ -81,8 +86,12 @@ public class AuthServiceImpl implements AuthService {
         String orgId = requiredText(userDetails, Constants.AUTH_FIELD_ORG_ID);
         String entityType = requiredText(userDetails, Constants.AUTH_FIELD_ENTITY_TYPE);
         String email = optionalText(userDetails, Constants.AUTH_FIELD_EMAIL);
+        String firstName = optionalText(userDetails, Constants.AUTH_FIELD_FIRST_NAME);
+        String lastName = optionalText(userDetails, Constants.AUTH_FIELD_LAST_NAME);
+        List<String> registries = optionalStrings(userDetails, Constants.AUTH_FIELD_REGISTRIES);
 
-        boolean created = keycloakService.upsertUser(userId, orgId, entityType, email);
+        boolean created = keycloakService.upsertUser(userId, orgId, entityType, email,
+                firstName, lastName, registries);
 
         CustomResponse response = new CustomResponse();
         Map<String, Object> result = new HashMap<>();
@@ -137,6 +146,11 @@ public class AuthServiceImpl implements AuthService {
         result.put("user_id", claim(jwt, CLAIM_USER_ID));
         result.put("org_id", claim(jwt, "org_id"));
         result.put("entity_type", claim(jwt, CLAIM_ENTITY_TYPE));
+        // From Keycloak's built-in profile/email scopes, not our mappers.
+        result.put("given_name", claim(jwt, "given_name"));
+        result.put("family_name", claim(jwt, "family_name"));
+        result.put("email", claim(jwt, Constants.AUTH_FIELD_EMAIL));
+        result.put("registries", claimList(jwt, Constants.AUTH_FIELD_REGISTRIES));
         result.put("exp", jwt.getExpiresAt() == null ? null : jwt.getExpiresAt().toInstant().getEpochSecond());
         result.put("jti", jwt.getId());
         result.put("sid", claim(jwt, "sid"));
@@ -223,8 +237,33 @@ public class AuthServiceImpl implements AuthService {
         return (node != null && node.hasNonNull(field)) ? node.get(field).asText() : null;
     }
 
+    /** Optional string array; null keeps, [] clears. Blanks/dupes dropped; a non-array is a 400. */
+    private List<String> optionalStrings(JsonNode node, String field) {
+        if (node == null || !node.hasNonNull(field)) {
+            return null;
+        }
+        JsonNode array = node.get(field);
+        if (!array.isArray()) {
+            throw new CustomException(Constants.AUTH_INVALID_REQUEST,
+                    Constants.AUTH_INVALID_REQUEST_MSG, HttpStatus.BAD_REQUEST);
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : array) {
+            String text = value.asText().trim();
+            if (StringUtils.isNotBlank(text) && !values.contains(text)) {
+                values.add(text);
+            }
+        }
+        return values;
+    }
+
     private String claim(DecodedJWT jwt, String name) {
         return jwt.getClaim(name).asString();
+    }
+
+    /** Multi-valued claim. Null when absent — Keycloak omits an empty attribute, so never {@code []}. */
+    private List<String> claimList(DecodedJWT jwt, String name) {
+        return jwt.getClaim(name).asList(String.class);
     }
 
     /** Records the freshly issued session. Safe to decode unverified: Keycloak just minted it. */

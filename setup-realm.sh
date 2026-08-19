@@ -117,24 +117,15 @@ step "1. Declaring custom attributes in the User Profile"
 # is already declared (username/email/firstName/lastName come as standard).
 PROFILE=$(api "$KC/admin/realms/$REALM/users/profile")
 
-# Attributes are admin-edit-only: a user must never be able to change their own org_id and
-# read another org's data. (`label` is reserved in jq, hence the `display` parameter name.)
-#
-# email/firstName/lastName are also dropped from `required`. Keycloak declares all three as
-# required for the `user` role by default, and an incomplete profile raises a VERIFY_PROFILE
-# required action, which makes the token request fail with:
-#
-#   {"error":"invalid_grant","error_description":"Account is not fully set up"}
-#
-# — surfacing as a bare 502 with the user visibly present and enabled. These Keycloak records are
-# machine-provisioned identity shells; the real profile lives in the catalogue, and auth_user_create
-# is not obliged to supply a name. So the realm must not insist on one.
+# Admin-edit-only: a user must never change their own org_id. (`label` is reserved in jq.)
+# email/firstName/lastName lose `required`: Keycloak requires them by default, and an incomplete
+# profile raises VERIFY_PROFILE, failing the grant with "Account is not fully set up".
 NEW_PROFILE=$(echo "$PROFILE" | jq '
-  def attr(n; display):
+  def attr(n; display; multi):
     {
       name: n,
       displayName: display,
-      multivalued: false,
+      multivalued: multi,
       permissions: { view: ["admin","user"], edit: ["admin"] },
       validations: { length: { min: 1, max: 64 } },
       annotations: {}
@@ -142,22 +133,34 @@ NEW_PROFILE=$(echo "$PROFILE" | jq '
   .unmanagedAttributePolicy = "ADMIN_EDIT"
   | .attributes = (
       .attributes
-      + (if any(.attributes[]; .name == "user_id")     then [] else [attr("user_id";     "OAS user id")]     end)
-      + (if any(.attributes[]; .name == "org_id")      then [] else [attr("org_id";      "OAS organisation id")] end)
-      + (if any(.attributes[]; .name == "entity_type") then [] else [attr("entity_type"; "OAS entity type")] end)
+      + (if any(.attributes[]; .name == "user_id")     then [] else [attr("user_id";     "OAS user id"; false)]     end)
+      + (if any(.attributes[]; .name == "org_id")      then [] else [attr("org_id";      "OAS organisation id"; false)] end)
+      + (if any(.attributes[]; .name == "entity_type") then [] else [attr("entity_type"; "OAS entity type"; false)] end)
+      + (if any(.attributes[]; .name == "registries")  then [] else [attr("registries";  "OAS registries"; true)]  end)
     )
+  # Self-healing: the append checks NAMES only, and multivalued:false installs an implicit max:1
+  # validator that 400s a two-registry write. BOOLEAN here, STRING "true" in the mapper.
+  # The multivalued VALIDATOR is deliberately not declared: it would make `max` mandatory.
+  | .attributes = [ .attributes[]
+      | if .name == "registries" then .multivalued = true else . end ]
   | .attributes = [ .attributes[]
       | if (.name == "email" or .name == "firstName" or .name == "lastName")
         then del(.required) else . end ]
 ')
 
 api -X PUT "$KC/admin/realms/$REALM/users/profile" "${J[@]}" -d "$NEW_PROFILE" >/dev/null
-DECLARED=$(api "$KC/admin/realms/$REALM/users/profile" | jq -r '[.attributes[].name] | join(", ")')
+PROFILE_AFTER=$(api "$KC/admin/realms/$REALM/users/profile")
+DECLARED=$(echo "$PROFILE_AFTER" | jq -r '[.attributes[].name] | join(", ")')
 ok "declared: $DECLARED"
 
-for a in user_id org_id entity_type; do
+for a in user_id org_id entity_type registries; do
   echo "$DECLARED" | grep -q "$a" || die "attribute $a was not declared — tokens will have no $a claim"
 done
+
+# The name check cannot catch a WRONGLY-declared attribute, and single-valued is the one that hurts.
+[ "$(echo "$PROFILE_AFTER" | jq -r '.attributes[] | select(.name=="registries") | .multivalued')" = "true" ] \
+  || die "registries is declared single-valued — a second registry would be rejected with 400"
+ok "registries is multi-valued"
 
 # ---------------------------------------------------------------------------------
 step "2. Client scope 'oas-profile' with attribute mappers"
@@ -219,6 +222,35 @@ else
       }
     }')" >/dev/null
   ok "added audience mapper ($CLIENT in aud)"
+fi
+
+# Out here, not in the scope-creation body, which only runs when the scope is absent.
+# multivalued:"true" is the point: with "false" Keycloak emits only the FIRST value, WARN only.
+REG_MAPPER='{
+  "name": "registries",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-usermodel-attribute-mapper",
+  "consentRequired": false,
+  "config": {
+    "user.attribute": "registries", "claim.name": "registries", "jsonType.label": "String",
+    "access.token.claim": "true", "id.token.claim": "true",
+    "userinfo.token.claim": "true", "introspection.token.claim": "true",
+    "multivalued": "true", "aggregate.attrs": "false"
+  }
+}'
+MAPPERS_URL="$KC/admin/realms/$REALM/client-scopes/$SCOPE_ID/protocol-mappers/models"
+REG_ID=$(api "$MAPPERS_URL" | jq -r '.[] | select(.name == "registries") | .id // empty')
+
+if [ -z "$REG_ID" ]; then
+  api -X POST "$MAPPERS_URL" "${J[@]}" -d "$REG_MAPPER" >/dev/null
+  ok "added the registries mapper (multivalued)"
+elif [ "$(api "$MAPPERS_URL/$REG_ID" | jq -r '.config.multivalued // empty')" = "true" ]; then
+  skip "registries mapper already multivalued"
+else
+  # Repaired in place: a presence-only check would skip a wrong mapper forever. PUT wants the id.
+  api -X PUT "$MAPPERS_URL/$REG_ID" "${J[@]}" \
+    -d "$(echo "$REG_MAPPER" | jq --arg id "$REG_ID" '.id = $id')" >/dev/null
+  ok "repaired the registries mapper -> multivalued"
 fi
 
 CID=$(api "$KC/admin/realms/$REALM/clients?clientId=$CLIENT" | jq -r '.[0].id')
@@ -367,6 +399,11 @@ if executions | jq -e '.[] | select(.providerId != null and (.providerId | test(
   die "the bound flow still contains a password validation step"
 fi
 ok "no credential check in the bound flow"
+
+# Asserted end to end: a single-valued mapper fails silently, so nothing downstream would notice.
+api "$MAPPERS_URL" | jq -e '.[] | select(.name=="registries" and .config.multivalued=="true")' >/dev/null \
+  || die "registries mapper missing or single-valued — tokens would carry only the first registry"
+ok "registries claim is multi-valued end to end"
 
 printf '\n%sRealm configured.%s\n' "$GRN" "$RST"
 executions | jq -r '.[] | "  \(.index)  \(.displayName)  [\(.requirement)]"'

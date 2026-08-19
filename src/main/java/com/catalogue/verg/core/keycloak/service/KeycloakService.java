@@ -48,9 +48,13 @@ public interface KeycloakService {
     /**
      * Creates or updates the Keycloak user, with no credential. Also the re-enable path.
      *
+     * <p>Optional fields are carried forward when omitted. {@code registries} is three-state: null
+     * keeps, empty clears, non-empty replaces — so a caller that owns the list must always send it.
+     *
      * @return true when a user was created, false when an existing one was updated
      */
-    boolean upsertUser(String userId, String orgId, String entityType, String email);
+    boolean upsertUser(String userId, String orgId, String entityType, String email,
+                       String firstName, String lastName, java.util.List<String> registries);
 
     /**
      * Disables the user and ends their Keycloak sessions.

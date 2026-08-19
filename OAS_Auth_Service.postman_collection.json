@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "3d5a91c4-6f2b-4e18-9a77-2c8e4b1f0d63",
     "name": "OAS Auth Service",
-    "description": "The auth-service on :8080 and Keycloak on :8180.\n\nKeycloak stores no passwords. It holds an identity shell per user \u2014 the userId plus org_id and entity_type \u2014 and issues tokens for it. This service owns those tokens and their revocation.\n\nRun the requests top to bottom. Bodies carry literal placeholders such as PASTE_USER_ID_HERE; replace them with values copied from the previous response. Every request description says what to copy and what to expect.\n\nThe core of it is Create Token, Validate Token and Invalidate Token. The rest exist to make those demonstrable and to cover the user lifecycle the catalogue drives.\n\nSelect the 'OAS Auth Service - Local' environment first.\n\nNote: verifying a username and password is NOT part of this yet. The catalogue will expose an endpoint for it and this service will call it before issuing a token. Until then Create Token trusts its caller, so none of these endpoints may be routed through Kong.",
+    "description": "The auth-service on :8080 and Keycloak on :8180.\n\nKeycloak stores no passwords. It holds an identity shell per user \u2014 the userId plus org_id, entity_type and registries \u2014 and issues tokens for it. This service owns those tokens and their revocation.\n\nRun the requests top to bottom. Bodies carry literal placeholders such as PASTE_USER_ID_HERE; replace them with values copied from the previous response. Every request description says what to copy and what to expect.\n\nThe core of it is Create Token, Validate Token and Invalidate Token. The rest exist to make those demonstrable and to cover the user lifecycle the catalogue drives.\n\nCREDENTIAL VERIFICATION is flag-gated and OFF by default. With catalogue.validate-enabled=false, Create Token takes {userId} and trusts its caller \u2014 which is what this collection assumes. Set it to true, with catalogue.base-url pointing at the user-catalogue, and Create Token instead takes {username, password}, verifies them against the catalogue's /user/v1/verify, and issues nothing unless it answers valid:true. The last request here shows that body.\n\nBecause the default trusts its caller, none of these endpoints may be routed through Kong or any ingress.\n\nSelect the 'OAS Auth Service - Local' environment first.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -49,9 +49,9 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"userId\": \"user-000000000001\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\"\n}"
+          "raw": "{\n  \"userId\": \"user-000000000001\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"firstName\": \"Season\",\n  \"lastName\": \"Field Agent\",\n  \"registries\": [\n    \"cropCatalogue\",\n    \"seasonCatalogue\"\n  ]\n}"
         },
-        "description": "Provisions the user in Keycloak so tokens can be issued for them. The user-catalogue calls this when a record becomes ACTIVE.\n\nPick any userId you like and reuse it in every request below. Change it to run through again with a fresh user.\n\nExpect 200 with created:true. Send it a second time and you get created:false \u2014 it is an upsert, because the catalogue retries a publish whose response it never saw.\n\n`orgId` and `entityType` are required: a user missing them would mint tokens with a null org_id, and every downstream tenant check would then silently see \"no org\".\n\n`email` is optional and left out here on purpose. You can add it \u2014 \"email\": \"you@example.com\" \u2014 but Keycloak enforces unique addresses, so reusing one that another userId already holds returns 409 AUTH_USER_CONFLICT. That is the one error here that retrying will never fix.\n\nNo password is sent. Keycloak stores no credential for these users at all."
+        "description": "Provisions the user in Keycloak so tokens can be issued for them. The user-catalogue calls this when a record becomes ACTIVE.\n\nPick any userId you like and reuse it in every request below. Change it to run through again with a fresh user.\n\nExpect 200 with created:true. Send it a second time and you get created:false \u2014 it is an upsert, because the catalogue retries a publish whose response it never saw.\n\n`orgId` and `entityType` are required. `firstName`, `lastName`, `email` and `registries` are optional.\n\n`registries` is the list of catalogues this user may use, and it reaches the token as a JSON ARRAY. It is three-state:\n  omitted  -> whatever is already stored is kept\n  []       -> cleared, and the claim disappears from the token entirely\n  [\"a\",\"b\"] -> replaced\nBlanks and duplicates are dropped. The values come from whoever owns the permission matrix; this service only carries what it is given.\n\n`email` is left out on purpose \u2014 Keycloak enforces unique addresses, so reusing one another userId already holds returns 409 AUTH_USER_CONFLICT, the one error retrying will never fix.\n\nNo password is sent. Keycloak stores no credential for these users at all."
       },
       "response": []
     },
@@ -80,7 +80,7 @@
           "mode": "raw",
           "raw": "{\n  \"userId\": \"PASTE_USER_ID_HERE\"\n}"
         },
-        "description": "Issues tokens for the user. Expect 200.\n\nCOPY result.access_token and result.refresh_token for the next requests.\n\nPaste the access token into jwt.io: user_id, org_id and entity_type are all there, projected from the Keycloak user attributes that Create User set.\n\nTakes no password. Verifying credentials is the caller's job and is not yet wired \u2014 see the README. Until it is, this endpoint mints a token for whatever userId it is given, which is why it must never be exposed publicly.\n\nRun it before Create User and you get 404 AUTH_USER_NOT_FOUND, which tells the catalogue its publish never completed."
+        "description": "Issues tokens for the user. Expect 200.\n\nCOPY result.access_token and result.refresh_token for the next requests.\n\nPaste the access token into jwt.io. Alongside user_id, org_id and entity_type you should see registries as an array, plus given_name, family_name, name and email \u2014 those four come from Keycloak's built-in scopes, so they appear as soon as Create User supplies the fields.\n\nThis body is the default, TRUSTED mode: no password, and a token is minted for whatever userId is given. With catalogue.validate-enabled=true the body becomes {username, password} instead \u2014 see the last request \u2014 and a userId in the body is then IGNORED, so one valid password cannot mint a token for another account.\n\nRun it before Create User and you get 404 AUTH_USER_NOT_FOUND, which tells the catalogue its publish never completed."
       },
       "response": []
     },
@@ -109,7 +109,7 @@
           "mode": "raw",
           "raw": "{\n  \"token\": \"PASTE_ACCESS_TOKEN_HERE\"\n}"
         },
-        "description": "Expect 200 with active:true and the catalogue identifiers.\n\nEntirely local: the signature is checked against Keycloak's published key, so there is no network call to Keycloak on the hot path. The token itself is never echoed back."
+        "description": "Expect 200 with active:true and the identity claims: user_id, org_id, entity_type, registries, given_name, family_name and email.\n\n`registries` is a JSON array. If it ever comes back as a bare string, the realm's protocol mapper is not marked multivalued and Keycloak is silently sending only the FIRST value \u2014 re-run ./setup-realm.sh, which asserts against exactly that. When the user holds none, the key is null rather than [], because Keycloak omits an empty attribute altogether.\n\nEntirely local: the signature is checked against Keycloak's published key, so there is no network call to Keycloak on the hot path. The token itself is never echoed back."
       },
       "response": []
     },
@@ -255,6 +255,35 @@
           "raw": "{\n  \"userId\": \"PASTE_USER_ID_HERE\"\n}"
         },
         "description": "Expect 404 AUTH_USER_NOT_FOUND. Proves the user is really gone.\n\nThis is why a delete endpoint exists at all: since token creation needs only a userId, a user deleted from the catalogue but left behind in Keycloak could have tokens minted for them indefinitely."
+      },
+      "response": []
+    },
+    {
+      "name": "Create Token (verified mode)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"PASTE_USERNAME_HERE\",\n  \"password\": \"PASTE_PASSWORD_HERE\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/auth/v1/auth_token_create",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_create"
+          ]
+        },
+        "description": "The body Create Token takes once credential verification is switched on. NOT part of the top-to-bottom walkthrough \u2014 on a default stack it returns 400 AUTH_INVALID_REQUEST, because the flag alone selects the path and the default path wants {userId}.\n\nTo try it: set CATALOGUE_VALIDATE_ENABLED=true and CATALOGUE_BASE_URL to the user-catalogue, restart, and confirm the log says mode=VERIFIED. Then:\n\n  valid:true  -> 200, and the token is for the userId the CATALOGUE returned\n  valid:false -> 401 AUTH_INVALID_CREDENTIALS\n  catalogue unreachable, or a body we cannot parse -> 503, never a token\n\nThe catalogue endpoint does not exist yet. Its contract is in README section 4."
       },
       "response": []
     }

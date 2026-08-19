@@ -15,16 +15,26 @@ public final class Constants {
 
     public static final String SUCCESS = "success";
 
-    // Request fields. There is no password field: no endpoint here accepts a credential.
+    // Request fields. auth_token_create accepts a credential only when
+    // catalogue.validate-enabled is true; no other endpoint here takes one.
+    public static final String AUTH_FIELD_USERNAME = "username";
+    public static final String AUTH_FIELD_PASSWORD = "password";
     public static final String AUTH_FIELD_TOKEN = "token";
     public static final String AUTH_FIELD_REFRESH_TOKEN = "refreshToken";
     public static final String AUTH_FIELD_USER_ID = "userId";
     public static final String AUTH_FIELD_ORG_ID = "orgId";
     public static final String AUTH_FIELD_ENTITY_TYPE = "entityType";
     public static final String AUTH_FIELD_EMAIL = "email";
+    public static final String AUTH_FIELD_FIRST_NAME = "firstName";
+    public static final String AUTH_FIELD_LAST_NAME = "lastName";
+    public static final String AUTH_FIELD_REGISTRIES = "registries";
 
     public static final String AUTH_INVALID_REQUEST = "AUTH_INVALID_REQUEST";
     public static final String AUTH_INVALID_REQUEST_MSG = "Request is missing a required field";
+
+    /** Deliberately identical for a wrong password, an unknown user and a non-ACTIVE account. */
+    public static final String AUTH_INVALID_CREDENTIALS = "AUTH_INVALID_CREDENTIALS";
+    public static final String AUTH_INVALID_CREDENTIALS_MSG = "Invalid credentials";
 
     public static final String AUTH_TOKEN_INVALID = "AUTH_TOKEN_INVALID";
     public static final String AUTH_TOKEN_INVALID_MSG = "Token is not valid";

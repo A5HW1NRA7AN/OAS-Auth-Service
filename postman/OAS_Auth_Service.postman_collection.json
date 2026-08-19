@@ -2,15 +2,27 @@
   "info": {
     "_postman_id": "b8f4e2a0-1c6d-4e93-a5b7-2f9c8d0e1a34",
     "name": "OAS Auth Service",
-    "description": "!! TEMPORARY — UAT HOSTED MODE (revert before prod) !!\n\nThis service is normally internal-only and NOT publicly reachable. For a limited UAT window it is exposed through Kong so it can be queried like the catalogue services. This collection is set up for that hosted mode by default.\n\nHOSTED MODE (default): base_url = http://18.183.107.166 (the nginx public host) and api_key = the same apikey you already use for the catalogue services. The collection sends it as the 'apikey' header on every request. NOTE: 18.183.107.166 is EPHEMERAL (not an Elastic IP) — it changes if nginx restarts, so re-confirm it before a run.\n\nLOCAL MODE: set base_url = http://localhost:8080 and leave api_key blank, then reach the pod with a port-forward (kubectl -n app port-forward svc/oas-auth-service 8080:8080) or run the stack locally (docker-compose + setup-realm.sh, see LOCAL_GUIDE.md). The apikey header is ignored by the pod in this mode.\n\nIS IT WORKING? Every request carries a test. Run the whole collection top to bottom — Postman's Collection Runner, or the CLI:\n\n  newman run postman/OAS_Auth_Service.postman_collection.json --env-var \"api_key=<your service apikey>\"\n\nAll green = the service, Keycloak wiring, JWT validation and the Redis denylist all work end to end. A red check names exactly what broke.\n\nSELF-CONTAINED: base_url, api_key and the working values (userId, access_token, refresh_token) are COLLECTION variables — no Postman environment is needed, do not select one. userId is left blank; a pre-request script fills in a throwaway user-<12 digits> for the run if you leave it empty. Set userId yourself (Collection > Variables) to target a specific user. Create Token's script captures the access and refresh tokens so Validate/Invalidate chain automatically.\n\nThe run creates a user, exercises the full token lifecycle, then deletes the user — it cleans up after itself and is safe to re-run.\n\nKeycloak runs privately at 10.0.10.10:8081 and is called by the service server-side — no request here talks to Keycloak directly.\n\nNote: verifying a username and password is NOT part of this yet; until it is, Create Token trusts its caller — which is exactly why this Kong exposure is TEMPORARY and must be reverted (back to internal-only) before prod.",
+    "description": "!! TEMPORARY \u2014 UAT HOSTED MODE (revert before prod) !!\n\nThis service is normally internal-only and NOT publicly reachable. For a limited UAT window it is exposed through Kong so it can be queried like the catalogue services. This collection is set up for that hosted mode by default.\n\nHOSTED MODE (default): base_url = http://18.183.107.166 (the nginx public host) and api_key = the same apikey you already use for the catalogue services. The collection sends it as the 'apikey' header on every request. NOTE: 18.183.107.166 is EPHEMERAL (not an Elastic IP) \u2014 it changes if nginx restarts, so re-confirm it before a run.\n\nLOCAL MODE: set base_url = http://localhost:8080 and leave api_key blank, then reach the pod with a port-forward (kubectl -n app port-forward svc/oas-auth-service 8080:8080) or run the stack locally (docker-compose + setup-realm.sh, see LOCAL_GUIDE.md). The apikey header is ignored by the pod in this mode.\n\nIS IT WORKING? Every request carries a test. Run the whole collection top to bottom \u2014 Postman's Collection Runner, or the CLI:\n\n  newman run postman/OAS_Auth_Service.postman_collection.json --env-var \"api_key=<your service apikey>\"\n\nAll green = the service, Keycloak wiring, JWT validation and the Redis denylist all work end to end. A red check names exactly what broke.\n\nSELF-CONTAINED: base_url, api_key and the working values (userId, access_token, refresh_token) are COLLECTION variables \u2014 no Postman environment is needed, do not select one. userId is left blank; a pre-request script fills in a throwaway user-<12 digits> for the run if you leave it empty. Set userId yourself (Collection > Variables) to target a specific user. Create Token's script captures the access and refresh tokens so Validate/Invalidate chain automatically.\n\nThe run creates a user, exercises the full token lifecycle, then deletes the user \u2014 it cleans up after itself and is safe to re-run.\n\nKeycloak runs privately at 10.0.10.10:8081 and is called by the service server-side \u2014 no request here talks to Keycloak directly.\n\nNote: verifying a username and password is NOT part of this yet; until it is, Create Token trusts its caller \u2014 which is exactly why this Kong exposure is TEMPORARY and must be reverted (back to internal-only) before prod.\n\nCredential verification is flag-gated and off by default (catalogue.validate-enabled), so Create Token here sends {userId} and the auth-service trusts its caller. This collection runs against that default. When the flag is on, Create Token takes {username, password} instead.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
     "type": "apikey",
     "apikey": [
-      { "key": "in",    "value": "header",     "type": "string" },
-      { "key": "key",   "value": "apikey",      "type": "string" },
-      { "key": "value", "value": "{{api_key}}", "type": "string" }
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      },
+      {
+        "key": "key",
+        "value": "apikey",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{api_key}}",
+        "type": "string"
+      }
     ]
   },
   "event": [
@@ -62,7 +74,7 @@
             "readiness"
           ]
         },
-        "description": "Confirms the service is up. Expect 200 with status UP.\n\nOwns no database, so this depends only on the app itself — it stays UP even if Keycloak or Redis are down. Those failures surface on the endpoints below instead."
+        "description": "Confirms the service is up. Expect 200 with status UP.\n\nOwns no database, so this depends only on the app itself \u2014 it stays UP even if Keycloak or Redis are down. Those failures surface on the endpoints below instead."
       },
       "response": []
     },
@@ -105,9 +117,9 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\"\n}"
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"firstName\": \"Season\",\n  \"lastName\": \"Field Agent\",\n  \"registries\": [\n    \"cropCatalogue\",\n    \"seasonCatalogue\"\n  ]\n}"
         },
-        "description": "Provisions the user in Keycloak so tokens can be issued for them. The user-catalogue calls this when a record becomes ACTIVE.\n\nSet the userId collection variable first — it is intentionally blank (a pre-request script fills in a throwaway one if you leave it empty). Whatever value is used is reused by every request below; change it to run through again with a fresh user. orgId and entityType are edited here in the body.\n\nExpect 200 with created:true. Send it a second time and you get created:false — it is an upsert, because the catalogue retries a publish whose response it never saw.\n\n`orgId` and `entityType` are required: a user missing them would mint tokens with a null org_id, and every downstream tenant check would then silently see \"no org\".\n\n`email` is optional and left out here on purpose. You can add it — \"email\": \"you@example.com\" — but Keycloak enforces unique addresses, so reusing one that another userId already holds returns 409 AUTH_USER_CONFLICT. That is the one error here that retrying will never fix.\n\nNo password is sent. Keycloak stores no credential for these users at all."
+        "description": "Provisions the user in Keycloak so tokens can be issued for them. The user-catalogue calls this when a record becomes ACTIVE.\n\nSet the userId collection variable first \u2014 it is intentionally blank (a pre-request script fills in a throwaway one if you leave it empty). Whatever value is used is reused by every request below; change it to run through again with a fresh user. orgId and entityType are edited here in the body.\n\nExpect 200 with created:true. Send it a second time and you get created:false \u2014 it is an upsert, because the catalogue retries a publish whose response it never saw.\n\n`orgId` and `entityType` are required: a user missing them would mint tokens with a null org_id, and every downstream tenant check would then silently see \"no org\".\n\n`email` is optional and left out here on purpose. You can add it \u2014 \"email\": \"you@example.com\" \u2014 but Keycloak enforces unique addresses, so reusing one that another userId already holds returns 409 AUTH_USER_CONFLICT. That is the one error here that retrying will never fix.\n\nNo password is sent. Keycloak stores no credential for these users at all."
       },
       "response": []
     },
@@ -156,7 +168,7 @@
           "mode": "raw",
           "raw": "{\n  \"userId\": \"{{userId}}\"\n}"
         },
-        "description": "Issues tokens for the user. Expect 200.\n\nThis request's test script saves result.access_token and result.refresh_token into the collection variables, so Validate Token and Invalidate Token below use them automatically — no copy-paste needed.\n\nPaste the access token into jwt.io: user_id, org_id and entity_type are all there, projected from the Keycloak user attributes that Create User set.\n\nTakes no password. Verifying credentials is the caller's job and is not yet wired — see the README. Until it is, this endpoint mints a token for whatever userId it is given, which is why it must never be exposed publicly outside a controlled UAT window.\n\nRun it before Create User and you get 404 AUTH_USER_NOT_FOUND, which tells the catalogue its publish never completed."
+        "description": "Issues tokens for the user. Expect 200.\n\nThis request's test script saves result.access_token and result.refresh_token into the collection variables, so Validate Token and Invalidate Token below use them automatically \u2014 no copy-paste needed.\n\nPaste the access token into jwt.io: user_id, org_id and entity_type are all there, projected from the Keycloak user attributes that Create User set.\n\nTakes no password. Verifying credentials is the caller's job and is not yet wired \u2014 see the README. Until it is, this endpoint mints a token for whatever userId it is given, which is why it must never be exposed publicly outside a controlled UAT window.\n\nRun it before Create User and you get 404 AUTH_USER_NOT_FOUND, which tells the catalogue its publish never completed."
       },
       "response": []
     },
@@ -173,6 +185,21 @@
               "  var r = pm.response.json().result;",
               "  pm.expect(r.active, \"active\").to.be.true;",
               "  pm.expect(r.user_id, \"user_id\").to.eql(pm.collectionVariables.get(\"userId\"));",
+              "});",
+              "",
+              "// The highest-value assertion here. A single-valued protocol mapper makes Keycloak emit",
+              "// only the FIRST registry with nothing but a WARN in its log, so a wrong access list would",
+              "// otherwise reach production silently. eql on the array catches both that and a missing",
+              "// User Profile declaration.",
+              "pm.test(\"registries is a multi-valued array\", function () {",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.registries, \"registries\").to.eql([\"cropCatalogue\", \"seasonCatalogue\"]);",
+              "});",
+              "",
+              "pm.test(\"profile claims come through from the built-in scopes\", function () {",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.given_name, \"given_name\").to.eql(\"Season\");",
+              "  pm.expect(r.family_name, \"family_name\").to.eql(\"Field Agent\");",
               "});"
             ]
           }
@@ -330,7 +357,7 @@
           "mode": "raw",
           "raw": "{\n  \"userId\": \"{{userId}}\"\n}"
         },
-        "description": "Blocks the account. The catalogue calls this on ACTIVE -> INACTIVE.\n\nExpect 200 with revoked:true and keycloakDisabled:ok. Two things happen, and neither alone is enough: every live token is denylisted (Keycloak cannot recall an issued token), and the Keycloak user is disabled (otherwise the block would quietly wear off when the denylist entries expired).\n\nAfterwards, Validate Token returns 401 for any token they held, and Create Token returns 403 AUTH_USER_DISABLED.\n\nTo undo it, call Create User again — that re-enables the user and clears the block. Tokens revoked here stay dead."
+        "description": "Blocks the account. The catalogue calls this on ACTIVE -> INACTIVE.\n\nExpect 200 with revoked:true and keycloakDisabled:ok. Two things happen, and neither alone is enough: every live token is denylisted (Keycloak cannot recall an issued token), and the Keycloak user is disabled (otherwise the block would quietly wear off when the denylist entries expired).\n\nAfterwards, Validate Token returns 401 for any token they held, and Create Token returns 403 AUTH_USER_DISABLED.\n\nTo undo it, call Create User again \u2014 that re-enables the user and clears the block. Tokens revoked here stay dead."
       },
       "response": []
     },
@@ -373,7 +400,7 @@
           "mode": "raw",
           "raw": "{\n  \"userId\": \"{{userId}}\"\n}"
         },
-        "description": "Removes the user from Keycloak and kills every token they hold. The catalogue calls this on delete.\n\nExpect 200 with revoked:true and deleted:true. Revocation happens first, deliberately: deleting a Keycloak user does not invalidate a JWT it already signed, and once the user is gone there is nothing left to enumerate their sessions from.\n\nSend it again and you get deleted:false with 200, not a 404 — a caller retrying a half-finished cleanup has to be able to complete it."
+        "description": "Removes the user from Keycloak and kills every token they hold. The catalogue calls this on delete.\n\nExpect 200 with revoked:true and deleted:true. Revocation happens first, deliberately: deleting a Keycloak user does not invalidate a JWT it already signed, and once the user is gone there is nothing left to enumerate their sessions from.\n\nSend it again and you get deleted:false with 200, not a 404 \u2014 a caller retrying a half-finished cleanup has to be able to complete it."
       },
       "response": []
     },

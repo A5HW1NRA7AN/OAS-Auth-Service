@@ -39,4 +39,15 @@ public class VergProperties {
     /** Must be >= the realm's access token lifespan, or revoked tokens outlive their entry. */
     @Value("${keycloak.denylist-sid-ttl-seconds}")
     private long keycloakDenylistSidTtlSeconds;
+
+    /** false: auth_token_create trusts its caller. true: the catalogue verifies the password. */
+    @Value("${catalogue.validate-enabled}")
+    private boolean catalogueValidateEnabled;
+
+    /** In-cluster Service DNS. Never the public host — this call carries a plaintext password. */
+    @Value("${catalogue.base-url}")
+    private String catalogueBaseUrl;
+
+    @Value("${catalogue.verify-path}")
+    private String catalogueVerifyPath;
 }
