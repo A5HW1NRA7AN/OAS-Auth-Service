@@ -23,6 +23,13 @@
     -->
     <logger name="com.catalogue.verg.auth.service.impl.AuthServiceImpl" level="OFF"/>
 
+    <!--
+      Most CatalogueServiceImpl tests drive the fail-closed paths, which log at ERROR by design.
+      passwordIsNeverLogged raises this level itself, or it would assert against an empty appender
+      and pass without proving anything.
+    -->
+    <logger name="com.catalogue.verg.core.catalogue.service.CatalogueServiceImpl" level="OFF"/>
+
     <root level="WARN">
         <appender-ref ref="CONSOLE"/>
     </root>

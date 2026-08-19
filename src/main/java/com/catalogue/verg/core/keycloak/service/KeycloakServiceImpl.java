@@ -10,6 +10,7 @@ import com.catalogue.verg.core.util.Constants;
 import com.catalogue.verg.core.util.VergProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -33,7 +34,9 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -48,6 +51,7 @@ public class KeycloakServiceImpl implements KeycloakService {
     private static final String CLAIM_USER_ID = "user_id";
     private static final String CLAIM_ORG_ID = "org_id";
     private static final String CLAIM_ENTITY_TYPE = "entity_type";
+    private static final String CLAIM_REGISTRIES = "registries";
     private static final String CLAIM_PREFERRED_USERNAME = "preferred_username";
     private static final String TOKEN_TYPE_BEARER = "Bearer";
 
@@ -326,17 +330,19 @@ public class KeycloakServiceImpl implements KeycloakService {
      * <p>This is also the re-enable path for INACTIVE -> ACTIVE.
      */
     @Override
-    public boolean upsertUser(String userId, String orgId, String entityType, String email) {
+    public boolean upsertUser(String userId, String orgId, String entityType, String email,
+                              String firstName, String lastName, List<String> registries) {
         try {
             JsonNode existing = findUser(userId);
             if (existing != null) {
-                updateUser(existing.path("id").asText(), userId, orgId, entityType, email);
+                updateUser(existing, userId, orgId, entityType, email, firstName, lastName, registries);
                 log.info("KeycloakServiceImpl::upsertUser: updated {}", userId);
                 return false;
             }
             try {
                 restTemplate.exchange(adminUsersUrl(), HttpMethod.POST,
-                        adminEntity(userPayload(userId, orgId, entityType, email, true)), String.class);
+                        adminEntity(userPayload(userId, orgId, entityType, email, firstName, lastName,
+                                registries, true)), String.class);
             } catch (HttpClientErrorException.Conflict e) {
                 // Either a concurrent publish of this same user, or the email belongs to somebody
                 // else. Only the first is ours to fix; the second must reach the caller as a 409
@@ -347,7 +353,7 @@ public class KeycloakServiceImpl implements KeycloakService {
                     throw new CustomException(Constants.AUTH_USER_CONFLICT,
                             Constants.AUTH_USER_CONFLICT_MSG, HttpStatus.CONFLICT);
                 }
-                updateUser(raced.path("id").asText(), userId, orgId, entityType, email);
+                updateUser(raced, userId, orgId, entityType, email, firstName, lastName, registries);
                 return false;
             }
             clearUserDenylist(userId);
@@ -363,10 +369,27 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    private void updateUser(String kcId, String userId, String orgId, String entityType, String email) {
-        restTemplate.exchange(adminUsersUrl() + "/" + kcId, HttpMethod.PUT,
-                adminEntity(userPayload(userId, orgId, entityType, email, false)), String.class);
+    /** A Keycloak PUT that omits a field CLEARS it (verified), so "not mentioned" must mean "keep". */
+    private void updateUser(JsonNode existing, String userId, String orgId, String entityType,
+                            String email, String firstName, String lastName, List<String> registries) {
+        restTemplate.exchange(adminUsersUrl() + "/" + existing.path("id").asText(), HttpMethod.PUT,
+                adminEntity(userPayload(userId, orgId, entityType,
+                        StringUtils.defaultIfBlank(email, existing.path("email").asText(null)),
+                        StringUtils.defaultIfBlank(firstName, existing.path("firstName").asText(null)),
+                        StringUtils.defaultIfBlank(lastName, existing.path("lastName").asText(null)),
+                        registries == null ? existingRegistries(existing) : registries,
+                        false)),
+                String.class);
         clearUserDenylist(userId);
+    }
+
+    /** findUser already returns attributes, so no extra round trip. Missing yields an empty list. */
+    private List<String> existingRegistries(JsonNode existing) {
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : existing.path("attributes").path(CLAIM_REGISTRIES)) {
+            values.add(value.asText());
+        }
+        return values;
     }
 
     /**
@@ -451,7 +474,9 @@ public class KeycloakServiceImpl implements KeycloakService {
      * Built with Jackson rather than string concatenation: an email containing a quote would
      * otherwise emit broken JSON. Note the absence of a {@code credentials} array.
      */
-    private String userPayload(String userId, String orgId, String entityType, String email, boolean create) {
+    private String userPayload(String userId, String orgId, String entityType, String email,
+                              String firstName, String lastName, List<String> registries,
+                              boolean create) {
         ObjectNode user = MAPPER.createObjectNode();
         if (create) {
             // Read-only once set; sending it on an update is at best a no-op and at worst a 400.
@@ -464,10 +489,22 @@ public class KeycloakServiceImpl implements KeycloakService {
             // fails with "Account is not fully set up".
             user.put("emailVerified", true);
         }
+        // No mapper needed: the built-in profile scope turns these into given_name/family_name/name.
+        if (StringUtils.isNotBlank(firstName)) {
+            user.put("firstName", firstName);
+        }
+        if (StringUtils.isNotBlank(lastName)) {
+            user.put("lastName", lastName);
+        }
         ObjectNode attributes = user.putObject("attributes");
         attributes.putArray(CLAIM_USER_ID).add(userId);
         attributes.putArray(CLAIM_ORG_ID).add(orgId);
         attributes.putArray(CLAIM_ENTITY_TYPE).add(entityType);
+        // Omitting the key is how Keycloak clears it, so "clear" needs no branch. Absent != [].
+        if (registries != null && !registries.isEmpty()) {
+            ArrayNode array = attributes.putArray(CLAIM_REGISTRIES);
+            registries.forEach(array::add);
+        }
         return user.toString();
     }
 
