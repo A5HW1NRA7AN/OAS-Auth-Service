@@ -395,17 +395,22 @@ public class KeycloakServiceImpl implements KeycloakService {
     /**
      * Sets {@code enabled=false} and ends every Keycloak session.
      *
-     * <p>Best-effort, mirroring {@link #logoutFromKeycloak}: the Redis revocation is the half that
-     * stops a blocked user who is already holding a valid access token, which is the part Keycloak
-     * cannot do at all. A Keycloak blip must not fail the block.
+     * <p>Best-effort on FAILURE, mirroring {@link #logoutFromKeycloak}: a Keycloak blip returns false
+     * rather than throwing, because the Redis revocation already stopped a user holding a live token.
+     *
+     * <p>But an ABSENT user throws 404. Nothing was revoked in that case — there were no sessions to
+     * denylist either — so reporting success would hide a caller that passed the wrong identifier.
+     * This endpoint takes the {@code userId}; passing an email silently blocks nobody.
      */
     @Override
     public boolean disableUser(String userId) {
         try {
             JsonNode existing = findUser(userId);
             if (existing == null) {
-                log.warn("KeycloakServiceImpl::disableUser: no Keycloak user for {}", userId);
-                return false;
+                log.warn("KeycloakServiceImpl::disableUser: no Keycloak user for {} — nothing was "
+                        + "revoked. This endpoint takes the userId, not the email.", userId);
+                throw new CustomException(Constants.AUTH_USER_NOT_FOUND,
+                        Constants.AUTH_USER_NOT_FOUND_MSG, HttpStatus.NOT_FOUND);
             }
             String kcId = existing.path("id").asText();
             // Deliberately a partial representation: Keycloak only touches `attributes` when that
@@ -417,6 +422,8 @@ public class KeycloakServiceImpl implements KeycloakService {
                     adminEntity(null), String.class);
             log.info("KeycloakServiceImpl::disableUser: disabled {} and ended its sessions", userId);
             return true;
+        } catch (CustomException e) {
+            throw e;
         } catch (Exception e) {
             log.warn("KeycloakServiceImpl::disableUser: could not disable {} in Keycloak; "
                     + "local revocation stands", userId);

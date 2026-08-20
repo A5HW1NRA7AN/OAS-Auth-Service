@@ -1,0 +1,738 @@
+{
+  "info": {
+    "_postman_id": "7e3b9d14-2c85-4a07-b6d3-8f2a1e5c7b93",
+    "name": "OAS Auth Service (deployed)",
+    "description": "End-to-end for the OAS auth-service and its integration with the user-catalogue.\n\nSELF-CONTAINED \u2014 there is nothing to fill in. Step 2 creates its own user in the catalogue with a fresh email each run and captures the userId, email and password into collection variables; every later step chains off those. Step 14 cleans up, so it is repeatable.\n\nWHAT IT PROVES, in order: both services are talking (step 2 only succeeds if the catalogue's call to auth_user_create succeeded), a password is really verified against the catalogue (4), the claims are projected including the multi-valued registries array (5), revocation is real (6-7), blocking works and holds (8-9), re-enabling is immediate and non-destructive (10-11), and deletion is complete (12-13).\n\nCredential verification is ON: auth_token_create takes {username, password} where username is the user's EMAIL. Sending {userId} returns 400 by design.\n\nRun it top to bottom, or with newman:\n  newman run <collection> -e <environment>",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Health Check",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 and UP', () => {",
+              "  pm.response.to.have.status(200);",
+              "  pm.expect(pm.response.json().status).to.eql('UP');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/actuator/health/readiness",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "actuator",
+            "health",
+            "readiness"
+          ]
+        },
+        "description": "The auth-service. Owns no database, so this only proves the app is up \u2014 a green probe does not mean logins work, since Keycloak and the catalogue failures surface as 503 on the endpoints."
+      },
+      "response": []
+    },
+    {
+      "name": "2. Onboard User (catalogue)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// A fresh email each run \u2014 the catalogue and Keycloak both reject duplicates.",
+              "pm.collectionVariables.set('userEmail', 'pm-' + Date.now() + '@oas.local');",
+              "pm.collectionVariables.set('userPassword', 'Postman#2026');"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 and created ACTIVE', () => {",
+              "  pm.response.to.have.status(200);",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.status, 'status').to.eql('ACTIVE');",
+              "  pm.expect(r.userId, 'userId').to.be.a('string');",
+              "  pm.collectionVariables.set('userId', r.userId);",
+              "});",
+              "",
+              "// The catalogue hashes it, so what comes back is never the plaintext we sent.",
+              "pm.test('the password was hashed, not stored verbatim', () => {",
+              "  var stored = pm.response.json().result.password;",
+              "  pm.expect(stored).to.not.eql(pm.collectionVariables.get('userPassword'));",
+              "  pm.expect(stored).to.match(/^\\$2[aby]\\$/);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{catalogue_url}}/user/v1/add",
+          "host": [
+            "{{catalogue_url}}"
+          ],
+          "path": [
+            "user",
+            "v1",
+            "add"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"firstName\": \"Postman\",\n  \"lastName\": \"Runner\",\n  \"email\": \"{{userEmail}}\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"password\": \"{{userPassword}}\",\n  \"pin\": \"1234\"\n}"
+        },
+        "description": "Seeds this run's own user, so there is nothing to fill in by hand.\n\nThis is the real onboarding path. The `user` catalogue has its lifecycle disabled (catalogue.lifecycle.entities.user=false), so there is no approve/review chain: add persists ACTIVE directly AND calls the auth-service's auth_user_create itself \u2014 and only persists if the auth-service accepts. So a 200 here already proves both services are talking.\n\nAll seven fields are required, `pin` included. The password is sent in PLAINTEXT and the catalogue hashes it (bcrypt) before storing.\n\nThe email is generated per run, so this is repeatable."
+      },
+      "response": []
+    },
+    {
+      "name": "3. Set Registries",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 and updated, not created', () => {",
+              "  pm.response.to.have.status(200);",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.userId).to.eql(pm.collectionVariables.get('userId'));",
+              "  pm.expect(r.created, 'created \u2014 step 2 already provisioned this user').to.eql(false);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_user_create",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_user_create"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"email\": \"{{userEmail}}\",\n  \"firstName\": \"Postman\",\n  \"lastName\": \"Runner\",\n  \"registries\": [\n    \"cropCatalogue\",\n    \"seasonCatalogue\"\n  ]\n}"
+        },
+        "description": "The user already exists in Keycloak (step 2 put it there), so this is an UPSERT \u2014 it returns created:false and adds what the catalogue does not send.\n\n`registries` is the list of catalogues this user may use. The catalogue's own call omits it entirely, so without this step the claim would be absent. Three-state: omitted keeps what is stored, [] clears, a list replaces."
+      },
+      "response": []
+    },
+    {
+      "name": "4. Create Token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 with both tokens', () => {",
+              "  pm.response.to.have.status(200);",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.access_token, 'access_token').to.be.a('string');",
+              "  pm.collectionVariables.set('access_token', r.access_token);",
+              "  pm.collectionVariables.set('refresh_token', r.refresh_token);",
+              "});",
+              "",
+              "// The token must be for the userId the CATALOGUE resolved, never for anything we sent.",
+              "pm.test('issued for the catalogue-resolved userId', () => {",
+              "  var c = JSON.parse(atob(pm.collectionVariables.get('access_token')",
+              "      .split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+              "  pm.expect(c.preferred_username).to.eql(pm.collectionVariables.get('userId'));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_create",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_create"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+        },
+        "description": "The login. Verification is ON, so this takes {username, password} \u2014 and `username` must be the EMAIL, because that is the field the catalogue matches on.\n\nThe auth-service calls the catalogue's /user/v1/verify, and issues a token only for the userId the catalogue returns. A userId in this body would be ignored.\n\nSending {userId} instead returns 400: the flag alone selects the path, so no caller can downgrade out of verification."
+      },
+      "response": []
+    },
+    {
+      "name": "5. Validate Token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 and active, with the catalogue identity', () => {",
+              "  pm.response.to.have.status(200);",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.active).to.eql(true);",
+              "  pm.expect(r.user_id).to.eql(pm.collectionVariables.get('userId'));",
+              "  pm.expect(r.org_id).to.eql('org-000000000001');",
+              "  pm.expect(r.entity_type).to.eql('MAKER');",
+              "});",
+              "",
+              "// The one assertion that catches a single-valued mapper, which fails silently otherwise.",
+              "pm.test('registries is a multi-valued array', () => {",
+              "  pm.expect(pm.response.json().result.registries)",
+              "      .to.eql(['cropCatalogue', 'seasonCatalogue']);",
+              "});",
+              "",
+              "// From Keycloak's built-in profile/email scopes \u2014 no mapper of ours produces these.",
+              "pm.test('profile claims are present', () => {",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.given_name).to.eql('Postman');",
+              "  pm.expect(r.family_name).to.eql('Runner');",
+              "  pm.expect(r.email).to.eql(pm.collectionVariables.get('userEmail'));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_validate",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_validate"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{access_token}}\"\n}"
+        },
+        "description": "Entirely local \u2014 the signature is checked against Keycloak's published key, so there is no call to Keycloak on this path.\n\n`registries` must come back as a JSON ARRAY. If it is ever a bare string, the realm's protocol mapper is not multivalued and Keycloak is silently sending only the first value \u2014 re-run setup-realm.sh, which asserts against exactly that."
+      },
+      "response": []
+    },
+    {
+      "name": "6. Invalidate Token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200, revoked locally and at the IdP', () => {",
+              "  pm.response.to.have.status(200);",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.localRevocation).to.eql('ok');",
+              "  pm.expect(r.idpLogout).to.eql('ok');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_invalidate",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_invalidate"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{access_token}}\",\n  \"refreshToken\": \"{{refresh_token}}\"\n}"
+        },
+        "description": "Denylists the token and its session in Redis, then ends the Keycloak session. `refreshToken` is optional; supplying it also kills the refresh token."
+      },
+      "response": []
+    },
+    {
+      "name": "7. Validate Token After Invalidate",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('401 AUTH_TOKEN_REVOKED', () => {",
+              "  pm.response.to.have.status(401);",
+              "  pm.expect(pm.response.json().code).to.eql('AUTH_TOKEN_REVOKED');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_validate",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_validate"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"token\": \"{{access_token}}\"\n}"
+        },
+        "description": "The same token. Expect 401 AUTH_TOKEN_REVOKED.\n\nThis is the point of the Redis denylist: a JWT is a self-contained signed string and Keycloak cannot recall one it already issued, so without this the token would keep working until it expired and 'invalidate' would be a lie."
+      },
+      "response": []
+    },
+    {
+      "name": "8. Revoke User",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200, revoked and disabled', () => {",
+              "  pm.response.to.have.status(200);",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.revoked).to.eql(true);",
+              "  pm.expect(r.keycloakDisabled).to.eql('ok');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_user_revoke",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_user_revoke"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"{{userId}}\"\n}"
+        },
+        "description": "Blocks the account. Two things happen and neither alone is enough: every live token is denylisted (Keycloak cannot recall an issued token), and the Keycloak user is disabled (otherwise the block would wear off when the denylist entries expired).\n\nNOTE THE IDENTIFIER: this takes the userId, NOT the email. auth_token_create takes the email because that is what the catalogue matches on; everything else here takes the userId, which is Keycloak's username. Send an email and you get 404 AUTH_USER_NOT_FOUND \u2014 nothing was revoked.\n\nA 200 with keycloakDisabled:\"failed\" means something different: Keycloak could not be reached, but the Redis revocation still stopped anyone holding a live token."
+      },
+      "response": []
+    },
+    {
+      "name": "9. Create Token After Revoke",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('403 AUTH_USER_DISABLED', () => {",
+              "  pm.response.to.have.status(403);",
+              "  pm.expect(pm.response.json().code).to.eql('AUTH_USER_DISABLED');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_create",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_create"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+        },
+        "description": "Expect 403 AUTH_USER_DISABLED.\n\nWorth understanding: the CATALOGUE still verifies this password perfectly happily \u2014 revoking does not touch its record \u2014 so verification succeeds and the request then fails at Keycloak. That is the two stores being independent, and it is why 403 rather than 401."
+      },
+      "response": []
+    },
+    {
+      "name": "10. Re-enable User",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 and updated', () => {",
+              "  pm.response.to.have.status(200);",
+              "  pm.expect(pm.response.json().result.created).to.eql(false);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_user_create",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_user_create"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"email\": \"{{userEmail}}\",\n  \"firstName\": \"Postman\",\n  \"lastName\": \"Runner\"\n}"
+        },
+        "description": "auth_user_create is also the re-enable path: it sets enabled=true again and clears the user-level denylist entry, so logins work immediately rather than after the TTL expires.\n\n`registries` is omitted here on purpose \u2014 omitted means KEEP, so the values from step 3 survive. That is what stops an unrelated republish wiping a user's access list."
+      },
+      "response": []
+    },
+    {
+      "name": "11. Create Token After Re-enable",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200, login works again at once', () => {",
+              "  pm.response.to.have.status(200);",
+              "  pm.expect(pm.response.json().result.access_token).to.be.a('string');",
+              "});",
+              "",
+              "// Step 10 omitted registries, so step 3's values must still be there.",
+              "pm.test('registries survived the re-enable', () => {",
+              "  var c = JSON.parse(atob(pm.response.json().result.access_token",
+              "      .split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
+              "  pm.expect(c.registries).to.eql(['cropCatalogue', 'seasonCatalogue']);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_create",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_create"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+        },
+        "description": "Expect 200 \u2014 immediately, not after the 900s denylist TTV. Proves the re-enable cleared the block rather than merely flipping the Keycloak flag."
+      },
+      "response": []
+    },
+    {
+      "name": "12. Delete User",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200, revoked and deleted', () => {",
+              "  pm.response.to.have.status(200);",
+              "  var r = pm.response.json().result;",
+              "  pm.expect(r.revoked).to.eql(true);",
+              "  pm.expect(r.deleted).to.eql(true);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_user_delete",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_user_delete"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"{{userId}}\"\n}"
+        },
+        "description": "Removes the Keycloak user and kills every token they hold. Revocation happens FIRST: deleting the user does not invalidate a JWT it already signed, and once it is gone there is nothing left to enumerate sessions from.\n\nSending it twice returns deleted:false with 200, not a 404 \u2014 a retried cleanup has to be able to finish."
+      },
+      "response": []
+    },
+    {
+      "name": "13. Create Token After Delete",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404 AUTH_USER_NOT_FOUND', () => {",
+              "  pm.response.to.have.status(404);",
+              "  pm.expect(pm.response.json().code).to.eql('AUTH_USER_NOT_FOUND');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_create",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_create"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+        },
+        "description": "Expect 404 AUTH_USER_NOT_FOUND.\n\nThe catalogue still authenticates this user \u2014 its record is untouched \u2014 so the 404 is proof the delete reached Keycloak. It is also the exact error the catalogue would see if a publish had never completed."
+      },
+      "response": []
+    },
+    {
+      "name": "14. Clean Up (catalogue)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200, catalogue record removed', () => {",
+              "  pm.response.to.have.status(200);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "url": {
+          "raw": "{{catalogue_url}}/user/v1/delete/{{userId}}",
+          "host": [
+            "{{catalogue_url}}"
+          ],
+          "path": [
+            "user",
+            "v1",
+            "delete",
+            "{{userId}}"
+          ]
+        },
+        "description": "Soft-deletes the catalogue record this run created, so repeated runs do not accumulate users. The Keycloak side is already gone from step 12.\n\nNote the record keeps its password hash in Postgres after a soft delete \u2014 only the search index and cache are purged."
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "userId",
+      "value": ""
+    },
+    {
+      "key": "userEmail",
+      "value": ""
+    },
+    {
+      "key": "userPassword",
+      "value": ""
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "refresh_token",
+      "value": ""
+    }
+  ]
+}

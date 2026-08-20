@@ -59,8 +59,10 @@ public interface KeycloakService {
     /**
      * Disables the user and ends their Keycloak sessions.
      *
-     * @return false if it could not be done — best-effort, because the Redis revocation is what
-     *         stops a blocked user already holding a token
+     * @return false if Keycloak could not be reached — best-effort, because the Redis revocation
+     *         already stops a blocked user holding a token
+     * @throws com.catalogue.verg.core.exception.CustomException 404 when there is no such user, since
+     *         nothing was revoked at all and a wrong identifier must not look like success
      */
     boolean disableUser(String userId);
 

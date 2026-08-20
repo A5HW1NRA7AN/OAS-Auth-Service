@@ -320,11 +320,16 @@ class KeycloakServiceImplAdminTest {
     }
 
     @Test
-    @DisplayName("disable on an unknown user returns false without calling Keycloak")
-    void disableUnknownUser() {
+    @DisplayName("disable on an unknown user is a loud 404, not a quiet false")
+    void disableUnknownUserIsNotFound() {
+        // Nothing was revoked, so success would hide a caller passing the wrong identifier — most
+        // likely the email, since that is what auth_token_create takes.
         stubUserLookup("[]");
 
-        assertThat(service.disableUser(USER_ID)).isFalse();
+        assertThatThrownBy(() -> service.disableUser(USER_ID))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_USER_NOT_FOUND)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.NOT_FOUND);
         verify(restTemplate, never()).exchange(contains("/logout"), any(), any(), eq(String.class));
     }
 
