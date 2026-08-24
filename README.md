@@ -610,44 +610,35 @@ how you rebuild it. Re-run it after any upgrade that recreates the realm.
 All container-free: an RSA key pair is generated in-process, tokens are minted with java-jwt, and
 Keycloak and Redis are mocked. The suite runs in a few seconds.
 
-One Postman collection, plus a local-only variant that differs from it only by environment:
+Two Postman collections, for manual walkthroughs of the same ten-step lifecycle:
 
 ```
-postman/OAS_Auth_Service.*             deployed: both services behind the shared nginx host, Kong API key
-postman/OAS_Auth_Service_local_test.*  auth-service :8080, catalogue :8082, no API key (gitignored)
+postman/OAS_Auth_Service.postman_collection.json             deployed, behind the shared nginx host
+postman/OAS_Auth_Service_local_test.postman_collection.json  auth-service :8080, catalogue :8082 (gitignored)
 ```
 
-Import a collection with the environment of the same name, or:
+Import a collection and run it. There is no environment file and nothing is captured automatically:
+each collection carries its own service URLs as collection variables, and the deployed one adds
+`api_key`, sent as the `apikey` header. Set it to an editors-scoped key, because Create User uses the
+catalogue's write route.
 
-```bash
-newman run postman/OAS_Auth_Service.postman_collection.json \
-       -e postman/OAS_Auth_Service.postman_environment.json
-```
+Everything else is typed by hand. Edit the user details in Create User, then copy the `userId` and the
+tokens out of each response into the requests that need them — the placeholders are `PASTE_USER_ID`,
+`PASTE_ACCESS_TOKEN` and `PASTE_REFRESH_TOKEN`.
 
-The collection logs in with `{email, password}`, so it needs a reachable catalogue. That is the default
+The order is: Create User, Read User, Verify Credentials, Create Token, Validate Token, Invalidate
+Token, Revoke User, Enable User, Delete User, Delete Catalogue Record. Re-running Validate Token after
+Invalidate Token, and Create Token after each of Revoke, Enable and Delete, is what shows the
+transitions — `401` revoked, `403` disabled, `200` again, then `404` not provisioned.
+
+Create User logs in with `{email, password}`, so it needs a reachable catalogue. That is the default
 behaviour; if someone has set `CATALOGUE_VALIDATE_ENABLED=false`, the login step returns `400`, because
 the flag alone selects the path ([§4](#4-credential-verification-flag-gated)).
 
-It is otherwise self-contained; there is nothing to fill in. Step 2 creates its own catalogue user with
-a fresh email each run and captures the userId, email and password; step 14 soft-deletes it, so it is
-repeatable. The only value you may need to supply is `api_key`, which must be an editors-scoped key
-because step 2 uses the catalogue's write route.
-
-14 requests, 19 assertions. Two are worth calling out.
-
-```js
-pm.expect(r.registries).to.eql(["cropCatalogue", "seasonCatalogue"]);   // step 5
-```
-
-fails if either the protocol mapper or the User Profile declaration is single-valued — the one bug in
-this area that is otherwise silent, because Keycloak then sends only the first value and logs nothing but
-a warning. And step 2 asserts the stored password is a bcrypt hash rather than the plaintext it was
-sent, which is the only check that the catalogue is hashing at all.
-
-The run is also an integration test of both services: step 2 only succeeds if the catalogue's own call to
-`auth_user_create` succeeded, so a green step 2 means the two are talking. Steps 9 and 13 are the
-interesting failures — the catalogue keeps authenticating a user that Keycloak has disabled or deleted,
-so those requests fail at Keycloak, which is the two stores being independent.
+Create User is also an integration test of both services: it only succeeds if the catalogue's own call
+to `auth_user_create` succeeded, so a green Create User means the two are talking. Keep the email
+unique — Keycloak allows one user per email, so re-using one returns `409` until the previous user is
+removed by the last two requests.
 
 Two behaviours worth verifying by hand after any change to revocation:
 
