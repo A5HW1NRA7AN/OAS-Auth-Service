@@ -40,49 +40,44 @@ public class AuthServiceImpl implements AuthService {
     private VergProperties vergProperties;
 
     /**
-     * Issues tokens. {@code catalogue.validate-enabled} false (default) takes {@code {userId}} and
-     * trusts the caller; true takes {@code {username, password}}, verified by the catalogue.
-     * Never log the request (a password when verified) or the result (the tokens).
+     * Issues tokens. Flag off (default) takes {@code {userId}} and trusts the caller; on takes
+     * {@code {email, password}}. Never log the request (a password) or the result (the tokens).
      */
     @Override
     public CustomResponse authTokenCreate(JsonNode tokenDetails) {
         boolean verified = vergProperties.isCatalogueValidateEnabled();
-        // The flag is otherwise silent: anything Spring does not read as true means false.
+        // Logged because the flag is otherwise silent: anything not read as true means false.
         log.info("AuthServiceImpl::authTokenCreate mode={}", verified ? "VERIFIED" : "TRUSTED");
 
         // Flag, not body shape: sniffing would let a caller downgrade by sending {userId}.
-        // In verified mode a body userId is ignored.
         String userId = verified
                 ? catalogueService.verifyCredentials(
-                        requiredText(tokenDetails, Constants.AUTH_FIELD_USERNAME),
+                        requiredText(tokenDetails, Constants.AUTH_FIELD_EMAIL),
                         requiredText(tokenDetails, Constants.AUTH_FIELD_PASSWORD))
                 : requiredText(tokenDetails, Constants.AUTH_FIELD_USER_ID);
 
         Map<String, Object> tokens = keycloakService.requestToken(userId);
-        // Index the session so a later "disable this user" can find and kill it.
         indexSession(tokens);
 
         CustomResponse response = new CustomResponse();
         response.setResult(tokens);
         success(response);
-        // The outcome names the path, so the audit trail shows whether the password was checked.
+        // The outcome names the path, so the audit shows whether the password was checked.
         audit("auth_token_create", userId, verified ? "SUCCESS" : "SUCCESS_UNVERIFIED",
                 entityTypeOf(tokens));
         return response;
     }
 
     /**
-     * Publishes a catalogue user into Keycloak. Called when the record becomes ACTIVE.
-     *
-     * <p>Idempotent, and also the re-enable path. Optional fields are carried forward when omitted;
-     * {@code registries} is three-state (absent keeps, {@code []} clears, non-empty replaces).
+     * Publishes a catalogue user into Keycloak when the record becomes ACTIVE. Idempotent, and the
+     * re-enable path. Optional fields carry forward; registries is three-state (absent keeps,
+     * {@code []} clears, non-empty replaces).
      */
     @Override
     public CustomResponse authUserCreate(JsonNode userDetails) {
         log.info("AuthServiceImpl::authUserCreate");
         String userId = requiredText(userDetails, Constants.AUTH_FIELD_USER_ID);
-        // Required, not optional: a Keycloak user missing these mints tokens with a null org_id, and
-        // every downstream tenant check then silently sees "no org".
+        // Required: without these, tokens carry a null org_id and tenant checks see "no org".
         String orgId = requiredText(userDetails, Constants.AUTH_FIELD_ORG_ID);
         String entityType = requiredText(userDetails, Constants.AUTH_FIELD_ENTITY_TYPE);
         String email = optionalText(userDetails, Constants.AUTH_FIELD_EMAIL);
@@ -105,11 +100,9 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
-     * Removes the user from Keycloak and kills every token they are holding.
-     *
-     * <p>Revocation happens FIRST and is load-bearing: deleting a Keycloak user does not invalidate a
-     * JWT it already signed, and once the user is gone there is nothing left to enumerate sessions
-     * for. So a Redis failure must stop the delete, not follow it.
+     * Removes the user from Keycloak and kills every token they hold. Revocation runs FIRST: a
+     * deleted user's already-signed JWTs stay valid, and once gone there are no sessions to
+     * enumerate. A Redis failure must therefore stop the delete, not follow it.
      */
     @Override
     public CustomResponse authUserDelete(JsonNode userDetails) {
@@ -123,8 +116,7 @@ public class AuthServiceImpl implements AuthService {
         Map<String, Object> result = new HashMap<>();
         result.put(Constants.AUTH_FIELD_USER_ID, userId);
         result.put("revoked", true);
-        // Absent in Keycloak is a success for an idempotent delete, not a 404: a caller retrying a
-        // half-finished cleanup must be able to complete it.
+        // Absent is success for an idempotent delete: a retried cleanup must be able to finish.
         result.put("deleted", deleted);
         response.setResult(result);
         success(response);
@@ -162,11 +154,8 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
-     * Revokes a token and ends its Keycloak session.
-     *
-     * <p>Expiry is ignored while verifying, because an expired access token still belongs to a
-     * session whose newer tokens are live. The token is verified before anything is written, so
-     * an unverified token cannot be used to fill Redis with junk.
+     * Revokes a token and ends its Keycloak session. Expiry is ignored: an expired token still
+     * belongs to a session with live siblings. Verified before any write, so junk cannot fill Redis.
      */
     @Override
     public CustomResponse authTokenInvalidate(JsonNode tokenDetails) {
@@ -192,14 +181,9 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
-     * Blocks an account: kills every live token, then disables the user in Keycloak.
-     *
-     * <p>Both halves are needed and neither is sufficient. The Redis revocation is what stops a user
-     * who is already holding a valid access token — Keycloak cannot recall one it has issued. The
-     * Keycloak disable is what makes the block outlast the denylist TTL, since otherwise the account
-     * would quietly start working again once those entries expired.
-     *
-     * <p>Revocation is load-bearing and throws; the disable is best-effort and reported in the body.
+     * Blocks an account: kills every live token, then disables the user in Keycloak. Neither half
+     * suffices — Redis stops a token already issued, the disable makes the block outlast the TTL.
+     * Revocation throws; the disable is best-effort and reported in the body.
      */
     @Override
     public CustomResponse authUserRevoke(JsonNode userDetails) {
@@ -221,10 +205,7 @@ public class AuthServiceImpl implements AuthService {
         return response;
     }
 
-    /**
-     * {@code node.get("password").asText()} throws NPE when the field is absent, surfacing as a
-     * confusing 500. This turns it into a 400.
-     */
+    /** A missing field would NPE into a 500; this makes it a 400. */
     private String requiredText(JsonNode node, String field) {
         if (node == null || !node.hasNonNull(field) || StringUtils.isBlank(node.get(field).asText())) {
             throw new CustomException(Constants.AUTH_INVALID_REQUEST,
@@ -290,11 +271,8 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /**
-     * Audit trail. Emitted to the application log, which the platform already collects — this
-     * service owns no database, and the `audit` catalogue belongs to agri-catalogue-service.
-     *
-     * <p>Deliberately logs only the operation, who did it and the outcome. Never the password, the
-     * token, or the raw request body.
+     * Audit trail, emitted to the application log the platform already collects; this service owns
+     * no database. Logs only operation, actor and outcome — never a password, token or raw body.
      */
     private void audit(String operation, String subject, String outcome, String entityType) {
         log.info("AUDIT operation={} userId={} entityType={} outcome={}",

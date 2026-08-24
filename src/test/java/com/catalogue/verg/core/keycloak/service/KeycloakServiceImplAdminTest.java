@@ -39,13 +39,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for the Keycloak admin plane — creating, disabling and deleting users, and the
- * service-account token that authorises all three.
- *
- * <p>Container-free like its sibling. The token endpoint and the admin API both go through the same
- * mocked RestTemplate, so stubs are separated by URL and response type: the token endpoint answers
- * {@code Map}, user lookups answer {@code JsonNode}, and writes answer {@code String}. Nothing here
- * needs an RSA key pair, since no token is verified.
+ * The Keycloak admin plane: creating, disabling and deleting users, and the service-account token
+ * behind them. The token endpoint and admin API share one mocked RestTemplate, so stubs are
+ * separated by URL and response type — Map for tokens, JsonNode for lookups, String for writes.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -55,7 +51,6 @@ class KeycloakServiceImplAdminTest {
     private static final String ORG_ID = "org-000000000001";
     private static final String ENTITY_TYPE = "MAKER";
     private static final String KC_ID = "kc-internal-1";
-    private static final String USERS_URL = "http://localhost:8180/admin/realms/OAS/users";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private KeycloakServiceImpl service;
@@ -320,11 +315,16 @@ class KeycloakServiceImplAdminTest {
     }
 
     @Test
-    @DisplayName("disable on an unknown user returns false without calling Keycloak")
-    void disableUnknownUser() {
+    @DisplayName("disable on an unknown user is a loud 404, not a quiet false")
+    void disableUnknownUserIsNotFound() {
+        // Nothing was revoked, so success would hide a caller passing the wrong identifier — most
+        // likely the email, since that is what auth_token_create takes.
         stubUserLookup("[]");
 
-        assertThat(service.disableUser(USER_ID)).isFalse();
+        assertThatThrownBy(() -> service.disableUser(USER_ID))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_USER_NOT_FOUND)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.NOT_FOUND);
         verify(restTemplate, never()).exchange(contains("/logout"), any(), any(), eq(String.class));
     }
 
@@ -372,11 +372,9 @@ class KeycloakServiceImplAdminTest {
     }
 
     /**
-     * Keycloak refuses the password grant while still honouring client_credentials.
-     *
-     * <p>Both hit the same URL, so the stub has to discriminate on {@code grant_type} exactly as
-     * Keycloak does. Matching only on the URL made the admin lookup inside the failure path fail too,
-     * which collapsed every diagnosis into a 503.
+     * Keycloak refuses the password grant but still honours client_credentials. Both hit the same
+     * URL, so the stub discriminates on {@code grant_type}; matching on URL alone broke the admin
+     * lookup in the failure path and collapsed every diagnosis into a 503.
      */
     @SuppressWarnings("unchecked")
     private void stubPasswordGrantRefused() {

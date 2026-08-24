@@ -39,12 +39,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for the service layer, which is where the JSON contract the user-catalogue integrates
- * against actually lives. Keycloak is mocked; nothing here touches a network or a container.
- *
- * <p>The ordering assertions are the important ones. {@code auth_user_delete} revoking before
- * deleting is not a style preference: deleting a Keycloak user does not invalidate a JWT it already
- * signed, and once the user is gone there is nothing left to enumerate sessions for.
+ * The service layer, where the JSON contract the catalogue integrates against lives. Keycloak is
+ * mocked. The ordering assertions matter most: delete must revoke first, because a deleted user's
+ * already-signed JWTs stay valid and there are then no sessions left to enumerate.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -67,7 +64,7 @@ class AuthServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        // Default false, matching application.properties, so untouched tests keep the trusting path.
+        // Set explicitly, not inherited: these tests cover the trusting path. The shipped default is true.
         props.setCatalogueValidateEnabled(false);
         props.setCatalogueBaseUrl("http://localhost:8082");
         props.setCatalogueVerifyPath("/user/v1/verify");
@@ -251,7 +248,7 @@ class AuthServiceImplTest {
     @DisplayName("with verification off, credentials are refused — no accidental half-verified mode")
     void tokenCreateWithCredentialsIsRejectedWhenVerificationIsOff() {
         assertThatThrownBy(() -> service.authTokenCreate(
-                json("{\"username\":\"asha\",\"password\":\"pw\"}")))
+                json("{\"email\":\"asha@example.org\",\"password\":\"pw\"}")))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_REQUEST);
         verify(catalogueService, never()).verifyCredentials(anyString(), anyString());
@@ -262,11 +259,11 @@ class AuthServiceImplTest {
     @DisplayName("with verification on, the token is issued for the userId the CATALOGUE returned")
     void tokenCreateUsesTheCatalogueUserId() {
         props.setCatalogueValidateEnabled(true);
-        when(catalogueService.verifyCredentials("asha", "pw")).thenReturn("user-from-catalogue");
+        when(catalogueService.verifyCredentials("asha@example.org", "pw")).thenReturn("user-from-catalogue");
 
-        service.authTokenCreate(json("{\"username\":\"asha\",\"password\":\"pw\"}"));
+        service.authTokenCreate(json("{\"email\":\"asha@example.org\",\"password\":\"pw\"}"));
 
-        verify(catalogueService).verifyCredentials("asha", "pw");
+        verify(catalogueService).verifyCredentials("asha@example.org", "pw");
         verify(keycloakService).requestToken("user-from-catalogue");
     }
 
@@ -275,10 +272,10 @@ class AuthServiceImplTest {
     void tokenCreateIgnoresABodyUserIdInVerifiedMode() {
         // Honouring it would let one valid password mint a token for any other account.
         props.setCatalogueValidateEnabled(true);
-        when(catalogueService.verifyCredentials("asha", "pw")).thenReturn("user-asha");
+        when(catalogueService.verifyCredentials("asha@example.org", "pw")).thenReturn("user-asha");
 
         service.authTokenCreate(json(
-                "{\"username\":\"asha\",\"password\":\"pw\",\"userId\":\"user-victim\"}"));
+                "{\"email\":\"asha@example.org\",\"password\":\"pw\",\"userId\":\"user-victim\"}"));
 
         verify(keycloakService).requestToken("user-asha");
         verify(keycloakService, never()).requestToken("user-victim");
@@ -301,7 +298,7 @@ class AuthServiceImplTest {
     void tokenCreateRequiresPasswordInVerifiedMode() {
         props.setCatalogueValidateEnabled(true);
 
-        assertThatThrownBy(() -> service.authTokenCreate(json("{\"username\":\"asha\"}")))
+        assertThatThrownBy(() -> service.authTokenCreate(json("{\"email\":\"asha@example.org\"}")))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_REQUEST);
         verify(catalogueService, never()).verifyCredentials(anyString(), anyString());
@@ -317,7 +314,7 @@ class AuthServiceImplTest {
                         Constants.AUTH_INVALID_CREDENTIALS_MSG, HttpStatus.UNAUTHORIZED));
 
         assertThatThrownBy(() -> service.authTokenCreate(
-                json("{\"username\":\"asha\",\"password\":\"wrong\"}")))
+                json("{\"email\":\"asha@example.org\",\"password\":\"wrong\"}")))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.UNAUTHORIZED);
         verify(keycloakService, never()).requestToken(anyString());
@@ -332,7 +329,7 @@ class AuthServiceImplTest {
                         Constants.AUTH_UPSTREAM_UNAVAILABLE_MSG, HttpStatus.SERVICE_UNAVAILABLE));
 
         assertThatThrownBy(() -> service.authTokenCreate(
-                json("{\"username\":\"asha\",\"password\":\"pw\"}")))
+                json("{\"email\":\"asha@example.org\",\"password\":\"pw\"}")))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.SERVICE_UNAVAILABLE);
         verify(keycloakService, never()).requestToken(anyString());

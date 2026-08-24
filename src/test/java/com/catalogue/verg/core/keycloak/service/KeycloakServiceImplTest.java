@@ -37,15 +37,8 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for token verification — the part of the auth-service where a mistake is an auth
- * bypass rather than a bug.
- *
- * <p>Deliberately container-free: an RSA key pair is generated in-process, tokens are minted with
- * java-jwt, and the JwkProvider is stubbed to hand back the matching public key. That keeps the
- * whole suite in the millisecond range, so there is no excuse not to run it.
- *
- * <p>The existing {@code contextLoads} test needs live Postgres/Redis/Elasticsearch, so nothing
- * here builds on it.
+ * Token verification, where a mistake is an auth bypass rather than a bug. Container-free: an RSA
+ * key pair is generated in-process, tokens are minted with java-jwt, and JwkProvider is stubbed.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -159,14 +152,10 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("a token signed with the PUBLIC KEY as an HMAC secret is rejected")
     void rejectsAlgorithmConfusionAttack() {
-        // The attack: Keycloak's public key is published openly at the JWKS endpoint. An attacker
-        // takes that public key, treats its bytes as an HMAC shared secret, signs a forged token
-        // with HS256, and sets alg=HS256 in the header. A verifier that reads the algorithm from
-        // the token header will fetch "the key" and verify successfully — because for HMAC the
-        // signing key and the verifying key are the same, and the attacker has it.
-        //
-        // KeycloakService hardcodes RSA256, so the forged token never gets that chance. If someone
-        // ever "simplifies" that line to read alg from the header, this test fails and explains why.
+        // Algorithm confusion: the JWKS public key is public, so an attacker can use its bytes as
+        // an HMAC secret and set alg=HS256. A header-trusting verifier accepts it, because for HMAC
+        // the signing and verifying key are the same. RS256 is pinned in code, so this fails if
+        // anyone "simplifies" that line to read alg from the header.
         String publicKeyAsSecret = Base64.getEncoder().encodeToString(publicKey.getEncoded());
         String forged = JWT.create()
                 .withKeyId(KID)
@@ -213,13 +202,8 @@ class KeycloakServiceImplTest {
         String[] parts = token.split("\\.");
         String signature = parts[2];
 
-        // Tamper the FIRST character of the signature, not the last.
-        //
-        // An RSA-2048 signature is 256 bytes = 2048 bits, which base64url encodes into 342
-        // characters carrying 2052 bits. The final character therefore holds only 2 significant
-        // bits plus 4 that are discarded on decode, so flipping it frequently produces the exact
-        // same signature bytes and the token still verifies — a genuinely flaky test. The first
-        // character always carries 6 significant bits, so changing it always changes the signature.
+        // First character, not last: the final base64url char of an RSA-2048 signature carries only
+        // 2 significant bits, so flipping it often decodes to the same bytes and the test flakes.
         char original = signature.charAt(0);
         String tampered = parts[0] + "." + parts[1] + "."
                 + (original == 'A' ? 'B' : 'A') + signature.substring(1);

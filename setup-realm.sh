@@ -16,9 +16,8 @@ ADMIN_PASS="${ADMIN_PASS:-admin}"
 
 FLOW_NAME="catalogue direct grant"
 
-# The retired custom authenticator. Still referenced here only so an existing realm gets
-# repaired: once the provider jar is gone from the image, a flow that still names it fails
-# every login with an unresolvable authenticator.
+# Retired custom authenticator, kept only to repair older realms: a flow still naming it
+# fails every login once the provider jar is gone from the image.
 RETIRED_AUTHENTICATOR="catalogue-validate-password"
 
 GRN=$'\033[0;32m'; YEL=$'\033[0;33m'; CYN=$'\033[0;36m'; RED=$'\033[0;31m'; RST=$'\033[0m'
@@ -253,13 +252,12 @@ else
   ok "repaired the registries mapper -> multivalued"
 fi
 
-CID=$(api "$KC/admin/realms/$REALM/clients?clientId=$CLIENT" | jq -r '.[0].id')
-[ -n "$CID" ] && [ "$CID" != "null" ] || die "client $CLIENT not found — run the Phase 1 setup first"
+[ -n "$CLIENT_UUID" ] && [ "$CLIENT_UUID" != "null" ] || die "client $CLIENT not found"
 
-if api "$KC/admin/realms/$REALM/clients/$CID/default-client-scopes" | jq -e '.[] | select(.name=="oas-profile")' >/dev/null; then
+if api "$KC/admin/realms/$REALM/clients/$CLIENT_UUID/default-client-scopes" | jq -e '.[] | select(.name=="oas-profile")' >/dev/null; then
   skip "oas-profile already attached to $CLIENT"
 else
-  api -X PUT "$KC/admin/realms/$REALM/clients/$CID/default-client-scopes/$SCOPE_ID" >/dev/null
+  api -X PUT "$KC/admin/realms/$REALM/clients/$CLIENT_UUID/default-client-scopes/$SCOPE_ID" >/dev/null
   ok "attached oas-profile to $CLIENT"
 fi
 
@@ -316,7 +314,7 @@ FLOW_URI=$(printf %s "$FLOW_NAME" | jq -sRr @uri)
 executions() { api "$KC/admin/realms/$REALM/authentication/flows/$FLOW_URI/executions"; }
 
 # Drop Keycloak's own password check. direct-grant-validate-username stays, so Keycloak
-# still resolves the user and enforces the `enabled` flag before our authenticator runs.
+# still resolves the user and enforces the `enabled` flag; nothing checks a credential.
 PW_EXEC=$(executions | jq -r '.[] | select(.providerId=="direct-grant-validate-password") | .id')
 if [ -n "$PW_EXEC" ]; then
   api -X DELETE "$KC/admin/realms/$REALM/authentication/executions/$PW_EXEC" >/dev/null

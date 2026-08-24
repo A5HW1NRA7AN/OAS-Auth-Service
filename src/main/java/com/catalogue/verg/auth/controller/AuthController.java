@@ -11,11 +11,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * The auth-service API.
- *
- * <p>Every endpoint here is intended for service-to-service use and none of them authenticate their
- * caller. They must not be routed through Kong or any ingress — see the README. That matters most for
- * {@code auth_token_create}, which currently mints a token for whatever userId it is given.
+ * The auth-service API, for service-to-service use. Only {@code auth_token_create} checks a
+ * credential (and only while {@code catalogue.validate-enabled} is on); the {@code auth_user_*}
+ * endpoints authenticate no caller at all, so they must not be reachable from an ingress —
+ * see the README.
  */
 @RestController
 @RequestMapping("/auth")
@@ -24,7 +23,8 @@ public class AuthController {
     @Autowired
     private AuthService authService;
 
-    /** userId -> tokens. Verifying the password is the caller's job; see AuthServiceImpl. */
+    /** {email, password} -> tokens, the password verified by the user-catalogue. Falls back to
+     *  {userId} on trust when {@code catalogue.validate-enabled} is off; see AuthServiceImpl. */
     @PostMapping("/v1/auth_token_create")
     public ResponseEntity<CustomResponse> authTokenCreate(@RequestBody JsonNode tokenDetails) {
         CustomResponse response = authService.authTokenCreate(tokenDetails);
@@ -45,20 +45,14 @@ public class AuthController {
         return new ResponseEntity<>(response, response.getResponseCode());
     }
 
-    /**
-     * Publishes a catalogue user into Keycloak, so tokens can be issued for them. Called when the
-     * record becomes ACTIVE. Idempotent, and the same call re-enables a revoked user.
-     */
+    /** Publishes a catalogue user into Keycloak on ACTIVE. Idempotent; also re-enables. */
     @PostMapping("/v1/auth_user_create")
     public ResponseEntity<CustomResponse> authUserCreate(@RequestBody JsonNode userDetails) {
         CustomResponse response = authService.authUserCreate(userDetails);
         return new ResponseEntity<>(response, response.getResponseCode());
     }
 
-    /**
-     * Blocks an account: kills every live token and disables the user in Keycloak. Called on
-     * ACTIVE -> INACTIVE. Disabling alone would only stop the next login.
-     */
+    /** Blocks an account on ACTIVE -> INACTIVE. Disabling alone would only stop the next login. */
     @PostMapping("/v1/auth_user_revoke")
     public ResponseEntity<CustomResponse> authUserRevoke(@RequestBody JsonNode userDetails) {
         CustomResponse response = authService.authUserRevoke(userDetails);

@@ -1,13 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  Test-only logging.
-
-  Several tests deliberately drive the failure paths — Redis down, Keycloak unreachable — and
-  KeycloakService logs those at ERROR with a full stack trace, which is correct in production
-  but prints ~80 lines of noise during a green build and makes a passing run look broken.
-
-  Silenced here only; production logging is untouched.
--->
+<!-- Test-only. Failure-path tests log at ERROR with stack traces, which makes a green build look
+     broken. Silenced here only; production logging is untouched. -->
 <configuration>
     <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
@@ -17,17 +10,11 @@
 
     <logger name="com.catalogue.verg.core.keycloak.service.KeycloakServiceImpl" level="OFF"/>
 
-    <!--
-      AuthServiceImpl warns when it cannot index a session, which every service-layer test triggers:
-      the mocked token is not a real JWT, so the best-effort decode fails by design.
-    -->
+    <!-- Every service-layer test trips the session-index warning: the mocked token is not a JWT. -->
     <logger name="com.catalogue.verg.auth.service.impl.AuthServiceImpl" level="OFF"/>
 
-    <!--
-      Most CatalogueServiceImpl tests drive the fail-closed paths, which log at ERROR by design.
-      passwordIsNeverLogged raises this level itself, or it would assert against an empty appender
-      and pass without proving anything.
-    -->
+    <!-- Fail-closed paths log at ERROR by design. passwordIsNeverLogged raises this level itself,
+         or it would assert against an empty appender and prove nothing. -->
     <logger name="com.catalogue.verg.core.catalogue.service.CatalogueServiceImpl" level="OFF"/>
 
     <root level="WARN">
