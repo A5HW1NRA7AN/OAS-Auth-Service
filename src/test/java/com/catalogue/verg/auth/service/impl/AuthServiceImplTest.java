@@ -64,7 +64,7 @@ class AuthServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        // Default false, matching application.properties, so untouched tests keep the trusting path.
+        // Set explicitly, not inherited: these tests cover the trusting path. The shipped default is true.
         props.setCatalogueValidateEnabled(false);
         props.setCatalogueBaseUrl("http://localhost:8082");
         props.setCatalogueVerifyPath("/user/v1/verify");

@@ -38,7 +38,7 @@ public class VergProperties {
     @Value("${keycloak.denylist-sid-ttl-seconds}")
     private long keycloakDenylistSidTtlSeconds;
 
-    /** false: auth_token_create trusts its caller. true: the catalogue verifies the password. */
+    /** true (default): the catalogue verifies the password. false: auth_token_create trusts its caller. */
     @Value("${catalogue.validate-enabled}")
     private boolean catalogueValidateEnabled;
 

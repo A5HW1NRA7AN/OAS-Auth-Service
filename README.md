@@ -14,9 +14,10 @@ the catalogue publishes.
 
 This service does not authenticate its callers. Access control is network-level only, so every endpoint
 here is intended for service-to-service use inside the cluster. Credential verification of the *end
-user* is a separate concern and is flag-gated: `false` by default, where `auth_token_create` takes
-`{userId}` and trusts its caller, and `true` in the deployed environment, where it takes
-`{email, password}` and verifies against the user-catalogue. See
+user* is a separate concern, and it is on by default: `auth_token_create` takes `{email, password}`
+and verifies them against the user-catalogue. It can be turned off with
+`CATALOGUE_VALIDATE_ENABLED=false`, which makes the endpoint take `{userId}` and trust its caller —
+useful only for running this service without a catalogue. See
 [§4](#4-credential-verification-flag-gated) and [§6](#6-security-posture).
 
 For the duration of the UAT integration window this service is reachable through Kong at the shared
@@ -68,7 +69,8 @@ cannot obtain a token, with no clean way to detect it afterwards.
 
 ### Issuing a token
 
-With `catalogue.validate-enabled=false` — the local default, and not how the deployed environment runs:
+With `catalogue.validate-enabled=false` — no longer the default, and only for running this service
+without a catalogue:
 
 ```
 caller -> POST /auth/v1/auth_token_create { userId }
@@ -88,7 +90,7 @@ The realm's direct grant flow contains no password step at all. `setup-realm.sh`
 it is gone. That is what makes a password-less grant possible, and it is also why the client secret and
 network isolation are the only things protecting this endpoint — see [§6](#6-security-posture).
 
-With the flag on, one step is added in front: the service asks the user-catalogue to verify the email
+By default one step is added in front: the service asks the user-catalogue to verify the email
 and password, and only the `userId` the catalogue returns reaches Keycloak. Keycloak's own role is
 unchanged, because it still holds no credential. See [§4](#4-credential-verification-flag-gated).
 
@@ -130,8 +132,13 @@ docker compose up -d              # Redis on 6380, Keycloak on 8180
 ./setup-realm.sh                  # realm, client, service account, flow, hardening; writes .env
 ./mvnw clean package
 set -a; . ./.env; set +a           # KEYCLOAK_CLIENT_SECRET
-java -jar target/svc-auth-0.0.1-SNAPSHOT.jar
+CATALOGUE_VALIDATE_ENABLED=false java -jar target/svc-auth-0.0.1-SNAPSHOT.jar
 ```
+
+The override is what makes this a standalone run. Credential verification is on by default and needs
+the user-catalogue reachable; without it `auth_token_create` returns `503`. Drop the override once the
+catalogue is running and log in with `{email, password}` instead — see
+[§4](#4-credential-verification-flag-gated).
 
 Ordering matters in one place: `setup-realm.sh` generates the client secret, so the application must
 start after it with `.env` sourced. Start it first and every call fails with `invalid_client`. The
@@ -359,12 +366,16 @@ nothing can be enumerated, and the distinction is the difference between "your p
 
 ## 4. Credential verification (flag-gated)
 
-`catalogue.validate-enabled` is `false` by default and `true` in the deployed environment, where it is
-set in OAS-Infra via `services/oas-auth-service.config.yaml`. The default stays `false` so a local stack
-works without a catalogue running.
+`catalogue.validate-enabled` is `true` by default, so credentials are verified unless someone turns
+that off. The deployed environment also sets it explicitly in OAS-Infra via
+`services/oas-auth-service.config.yaml`.
+
+The cost of the safe default is that this service no longer starts useful without a reachable
+catalogue: with no catalogue, `auth_token_create` returns `503`. Set `CATALOGUE_VALIDATE_ENABLED=false`
+to run it standalone — it then takes `{userId}` and trusts its caller completely.
 
 ```properties
-catalogue.validate-enabled=false            # default: auth_token_create takes {userId}, trusts caller
+catalogue.validate-enabled=true             # default: {email, password}, verified by the catalogue
 catalogue.base-url=http://localhost:8082    # the user-catalogue. In-cluster:
                                             #   http://org-user-notification-services.app.svc.cluster.local:8080
 catalogue.verify-path=/user/v1/verify
@@ -437,7 +448,7 @@ Nothing in the catalogue talks to Keycloak, and Keycloak does not call the catal
 | `ACTIVE -> INACTIVE` | `auth_user_revoke` | |
 | `INACTIVE -> ACTIVE` | `auth_user_create` | re-enables and clears the block |
 | record deleted | `auth_user_delete` | |
-| login | `auth_token_create` with `{email, password}` | only when `catalogue.validate-enabled=true` |
+| login | `auth_token_create` with `{email, password}` | unless `catalogue.validate-enabled` is turned off |
 
 If the catalogue takes ownership of `registries`, it must send the key on every `auth_user_create`, and
 send `[]` to revoke access. Omitting it means "keep what is stored", which is right for a caller that
@@ -464,13 +475,14 @@ the shared nginx host (`/auth/v1/*`) behind the existing catalogue API keys, whi
 client but not an end user. The revert is tracked in OAS-Infra (`kong/kong.decK.yaml`, block marked
 `TEMP/UAT`) and must be completed before production.
 
-`auth_token_create` mints a token for any `userId` while `catalogue.validate-enabled` is `false`, which
-is the default. A single misconfigured Kong route is then a full authentication bypass for every
-account. Turning the flag on is the fix; until then the network is the only control.
+`auth_token_create` mints a token for any `userId` whenever `catalogue.validate-enabled` is `false`.
+A single misconfigured Kong route is then a full authentication bypass for every account. The default
+is `true`, so this requires someone to actively turn verification off.
 
-The flag is silent when it is wrong. A missing or misspelled `CATALOGUE_VALIDATE_ENABLED` reverts to
-trusting the caller and still returns a token — the only failure in this service whose wrong outcome is a
-200. Grep the log for `mode=VERIFIED` after any deployment that expects verification.
+The flag is silent when it is wrong. `CATALOGUE_VALIDATE_ENABLED` set to anything Spring does not read
+as `true` — `0`, `False`, `"true "` — means `false`, drops back to trusting the caller and still returns
+a token: the only failure in this service whose wrong outcome is a 200. An unset variable is now safe,
+because the default is `true`. Grep the log for `mode=VERIFIED` after any deployment.
 
 The `oas-auth-service` client secret is the boundary. Because the realm's direct grant flow checks no
 credential, anyone holding that secret can obtain a token for any user in the realm. Treat it as a root
@@ -527,7 +539,7 @@ Everything is environment-driven with a local default.
 | `KEYCLOAK_CONNECT_TIMEOUT_MS` / `_READ_TIMEOUT_MS` | 2000 / 5000 | tune as needed |
 | `KEYCLOAK_CLOCK_SKEW_SECONDS` | 30 | 30 |
 | `KEYCLOAK_DENYLIST_SID_TTL_SECONDS` | 900 | at least the SSO session max |
-| `CATALOGUE_VALIDATE_ENABLED` | `false` | `true` |
+| `CATALOGUE_VALIDATE_ENABLED` | `true` | `true` |
 | `CATALOGUE_BASE_URL` | `http://localhost:8082` | `http://org-user-notification-services.app.svc.cluster.local:8080` (Service DNS, not the public host) |
 | `CATALOGUE_VERIFY_PATH` | `/user/v1/verify` | same |
 | `CATALOGUE_CONNECT_TIMEOUT_MS` / `_READ_TIMEOUT_MS` | 2000 / 5000 | the read timeout is the login latency ceiling |
@@ -612,9 +624,9 @@ newman run postman/OAS_Auth_Service.postman_collection.json \
        -e postman/OAS_Auth_Service.postman_environment.json
 ```
 
-The collection logs in with `{email, password}`, so it requires `CATALOGUE_VALIDATE_ENABLED=true` and a
-reachable catalogue. With the flag off, step 4 correctly returns `400`, because the flag alone selects
-the path ([§4](#4-credential-verification-flag-gated)).
+The collection logs in with `{email, password}`, so it needs a reachable catalogue. That is the default
+behaviour; if someone has set `CATALOGUE_VALIDATE_ENABLED=false`, the login step returns `400`, because
+the flag alone selects the path ([§4](#4-credential-verification-flag-gated)).
 
 It is otherwise self-contained; there is nothing to fill in. Step 2 creates its own catalogue user with
 a fresh email each run and captures the userId, email and password; step 14 soft-deletes it, so it is
