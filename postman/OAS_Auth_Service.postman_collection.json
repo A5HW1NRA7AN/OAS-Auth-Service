@@ -1,8 +1,8 @@
 {
   "info": {
-    "_postman_id": "5c1a7f20-9b34-4d61-8e2f-1a7c3d9b0e41",
-    "name": "OAS Auth Service (local)",
-    "description": "End-to-end for the OAS auth-service and its integration with the user-catalogue.\n\nSELF-CONTAINED \u2014 there is nothing to fill in. Step 2 creates its own user in the catalogue with a fresh email each run and captures the userId, email and password into collection variables; every later step chains off those. Step 14 cleans up, so it is repeatable.\n\nWHAT IT PROVES, in order: both services are talking (step 2 only succeeds if the catalogue's call to auth_user_create succeeded), a password is really verified against the catalogue (4), the claims are projected including the multi-valued registries array (5), revocation is real (6-7), blocking works and holds (8-9), re-enabling is immediate and non-destructive (10-11), and deletion is complete (12-13).\n\nCredential verification is ON: auth_token_create takes {username, password} where username is the user's EMAIL. Sending {userId} returns 400 by design.\n\nRun it top to bottom, or with newman:\n  newman run <collection> -e <environment>",
+    "_postman_id": "7e3b9d14-2c85-4a07-b6d3-8f2a1e5c7b93",
+    "name": "OAS Auth Service",
+    "description": "End-to-end for the OAS auth-service and its integration with the user-catalogue.\n\nSELF-CONTAINED \u2014 there is nothing to fill in. Step 2 creates its own user in the catalogue with a fresh email each run and captures the userId, email and password into collection variables; every later step chains off those. Step 14 cleans up, so it is repeatable.\n\nWHAT IT PROVES, in order: both services are talking (step 2 only succeeds if the catalogue's call to auth_user_create succeeded), a password is really verified against the catalogue (4), the claims are projected including the multi-valued registries array (5), revocation is real (6-7), blocking works and holds (8-9), re-enabling is immediate and non-destructive (10-11), and deletion is complete (12-13).\n\nCredential verification is ON: auth_token_create takes {email, password}. Sending {userId} returns 400 by design.\n\nRun it top to bottom, or with newman:\n  newman run <collection> -e <environment>",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -213,9 +213,9 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+          "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
         },
-        "description": "The login. Verification is ON, so this takes {username, password} \u2014 and `username` must be the EMAIL, because that is the field the catalogue matches on.\n\nThe auth-service calls the catalogue's /user/v1/verify, and issues a token only for the userId the catalogue returns. A userId in this body would be ignored.\n\nSending {userId} instead returns 400: the flag alone selects the path, so no caller can downgrade out of verification."
+        "description": "The login. Verification is ON, so this takes {username, password} \u2014 and The field is `email`: the catalogue has no username column and matches on this.\n\nThe auth-service calls the catalogue's /user/v1/verify, and issues a token only for the userId the catalogue returns. A userId in this body would be ignored.\n\nSending {userId} instead returns 400: the flag alone selects the path, so no caller can downgrade out of verification."
       },
       "response": []
     },
@@ -470,7 +470,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+          "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
         },
         "description": "Expect 403 AUTH_USER_DISABLED.\n\nWorth understanding: the CATALOGUE still verifies this password perfectly happily \u2014 revoking does not touch its record \u2014 so verification succeeds and the request then fails at Keycloak. That is the two stores being independent, and it is why 403 rather than 401."
       },
@@ -571,7 +571,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+          "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
         },
         "description": "Expect 200 \u2014 immediately, not after the 900s denylist TTV. Proves the re-enable cleared the block rather than merely flipping the Keycloak flag."
       },
@@ -667,7 +667,7 @@
         },
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"username\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
+          "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}"
         },
         "description": "Expect 404 AUTH_USER_NOT_FOUND.\n\nThe catalogue still authenticates this user \u2014 its record is untouched \u2014 so the 404 is proof the delete reached Keycloak. It is also the exact error the catalogue would see if a publish had never completed."
       },

@@ -39,9 +39,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * The credential check, against the contract the catalogue actually deployed: {email, password} in,
- * 2xx + result.userId for success, 401/403 for a rejection. Every test is the same assertion — no
- * token unless a 2xx carried a userId — and the interesting half is which failures must NOT be 401.
+ * The credential check against the deployed catalogue contract: {email, password} in, 2xx +
+ * result.userId for success, 401/403 for a rejection. The interesting half is which failures
+ * must NOT become a 401.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -49,7 +49,7 @@ class CatalogueServiceImplTest {
 
     private static final String BASE_URL = "http://localhost:8082";
     private static final String VERIFY_PATH = "/user/v1/verify";
-    private static final String USERNAME = "asha@example.org";
+    private static final String EMAIL = "asha@example.org";
     private static final String PASSWORD = "Sup3r-S3cret!";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -86,16 +86,15 @@ class CatalogueServiceImplTest {
     void postsCredentialsToConfiguredUrl() {
         stubResponse("{\"result\":{\"userId\":\"user-1\",\"status\":\"ACTIVE\"}}");
 
-        service.verifyCredentials(USERNAME, PASSWORD);
+        service.verifyCredentials(EMAIL, PASSWORD);
 
         ArgumentCaptor<HttpEntity> captor = ArgumentCaptor.forClass(HttpEntity.class);
         verify(restTemplate).exchange(eq(BASE_URL + VERIFY_PATH), eq(HttpMethod.POST),
                 captor.capture(), eq(JsonNode.class));
         @SuppressWarnings("unchecked")
         Map<String, String> body = (Map<String, String>) captor.getValue().getBody();
-        // The catalogue's field is `email`, not `username`. Password untrimmed: it is bytes, not a name.
-        assertThat(body).containsEntry("email", USERNAME).containsEntry("password", PASSWORD);
-        assertThat(body).doesNotContainKey("username");
+        // Password untrimmed: it is bytes, not a name.
+        assertThat(body).containsEntry("email", EMAIL).containsEntry("password", PASSWORD);
     }
 
     @Test
@@ -104,7 +103,7 @@ class CatalogueServiceImplTest {
         stubResponse("{\"result\":{\"userId\":\"user-1\",\"email\":\"a@b.example\","
                 + "\"status\":\"ACTIVE\"},\"message\":\"successfully verified\"}");
 
-        assertThat(service.verifyCredentials(USERNAME, PASSWORD)).isEqualTo("user-1");
+        assertThat(service.verifyCredentials(EMAIL, PASSWORD)).isEqualTo("user-1");
     }
 
     // ── rejection: 401 and 403 are collapsed ──────────────────────────────────────────────────
@@ -116,7 +115,7 @@ class CatalogueServiceImplTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.UNAUTHORIZED,
                         "Invalid credentials", null, null, null));
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_CREDENTIALS)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.UNAUTHORIZED);
@@ -131,7 +130,7 @@ class CatalogueServiceImplTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.FORBIDDEN,
                         "User is not active", null, null, null));
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_CREDENTIALS)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.UNAUTHORIZED);
@@ -140,13 +139,13 @@ class CatalogueServiceImplTest {
     // ── everything else is an outage, and must NOT become a 401 ───────────────────────────────
 
     @Test
-    @DisplayName("2xx with no userId is a 503 — never a token for the submitted username")
+    @DisplayName("2xx with no userId is a 503 — never a token for the submitted email")
     void successWithoutUserIdIsUnavailable() {
-        // The tempting fallback — "use the username we were given" — would feed unvalidated caller
+        // The tempting fallback — "use the email we were given" — would feed unvalidated caller
         // input to Keycloak as a username.
         stubResponse("{\"result\":{\"status\":\"ACTIVE\"}}");
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.SERVICE_UNAVAILABLE);
@@ -161,7 +160,7 @@ class CatalogueServiceImplTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.BAD_REQUEST,
                         "Email and password are required", null, null, null));
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE);
     }
@@ -174,7 +173,7 @@ class CatalogueServiceImplTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.NOT_FOUND,
                         "no Route matched with those values", null, null, null));
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE);
     }
@@ -184,7 +183,7 @@ class CatalogueServiceImplTest {
     void nullBodyIsUnavailable() {
         stubResponse(null);
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE);
     }
@@ -195,7 +194,7 @@ class CatalogueServiceImplTest {
         when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(), eq(JsonNode.class)))
                 .thenThrow(new ResourceAccessException("connection refused"));
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE);
     }
@@ -207,7 +206,7 @@ class CatalogueServiceImplTest {
                 .thenThrow(HttpServerErrorException.create(HttpStatus.INTERNAL_SERVER_ERROR,
                         "boom", null, null, null));
 
-        assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+        assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE);
     }
@@ -229,7 +228,7 @@ class CatalogueServiceImplTest {
                     .thenThrow(HttpClientErrorException.create(HttpStatus.BAD_REQUEST,
                             "bad request: password=" + PASSWORD, null, null, null));
 
-            assertThatThrownBy(() -> service.verifyCredentials(USERNAME, PASSWORD))
+            assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
                     .isInstanceOf(CustomException.class);
 
             assertThat(appender.list).isNotEmpty();

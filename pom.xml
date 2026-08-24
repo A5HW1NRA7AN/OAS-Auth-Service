@@ -57,12 +57,6 @@
             </exclusions>
         </dependency>
         <dependency>
-            <groupId>org.sonarsource.scanner.maven</groupId>
-            <artifactId>sonar-maven-plugin</artifactId>
-            <version>3.8.0.2131</version>
-        </dependency>
-
-        <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
             <version>2.5.0</version>
@@ -77,16 +71,16 @@
             <artifactId>java-jwt</artifactId>
             <version>4.4.0</version>
         </dependency>
-        <!--
-            Companion to java-jwt: fetches Keycloak's public signing keys from the realm's
-            JWKS endpoint. java-jwt can verify a signature but cannot go and get the key.
-            Caching survives Keycloak's key rotation without an app restart; rate limiting
-            stops tokens carrying made-up `kid` values from becoming a flood of requests.
-        -->
+        <!-- Companion to java-jwt: fetches Keycloak's signing keys; java-jwt cannot fetch them. -->
         <dependency>
             <groupId>com.auth0</groupId>
             <artifactId>jwks-rsa</artifactId>
             <version>0.22.1</version>
+        </dependency>
+        <!-- Used directly by three main classes; version managed by the Boot parent. -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
         </dependency>
 	</dependencies>
 

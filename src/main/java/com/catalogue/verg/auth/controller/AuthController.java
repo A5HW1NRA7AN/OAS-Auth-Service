@@ -11,11 +11,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * The auth-service API.
- *
- * <p>Every endpoint here is intended for service-to-service use and none of them authenticate their
- * caller. They must not be routed through Kong or any ingress — see the README. That matters most for
- * {@code auth_token_create}, which currently mints a token for whatever userId it is given.
+ * The auth-service API. Every endpoint is for service-to-service use and none authenticate their
+ * caller, so none may be routed through an ingress — see the README.
  */
 @RestController
 @RequestMapping("/auth")
@@ -45,20 +42,14 @@ public class AuthController {
         return new ResponseEntity<>(response, response.getResponseCode());
     }
 
-    /**
-     * Publishes a catalogue user into Keycloak, so tokens can be issued for them. Called when the
-     * record becomes ACTIVE. Idempotent, and the same call re-enables a revoked user.
-     */
+    /** Publishes a catalogue user into Keycloak on ACTIVE. Idempotent; also re-enables. */
     @PostMapping("/v1/auth_user_create")
     public ResponseEntity<CustomResponse> authUserCreate(@RequestBody JsonNode userDetails) {
         CustomResponse response = authService.authUserCreate(userDetails);
         return new ResponseEntity<>(response, response.getResponseCode());
     }
 
-    /**
-     * Blocks an account: kills every live token and disables the user in Keycloak. Called on
-     * ACTIVE -> INACTIVE. Disabling alone would only stop the next login.
-     */
+    /** Blocks an account on ACTIVE -> INACTIVE. Disabling alone would only stop the next login. */
     @PostMapping("/v1/auth_user_revoke")
     public ResponseEntity<CustomResponse> authUserRevoke(@RequestBody JsonNode userDetails) {
         CustomResponse response = authService.authUserRevoke(userDetails);

@@ -4,12 +4,11 @@ package com.catalogue.verg.core.catalogue.service;
 public interface CatalogueService {
 
     /**
-     * @param username whatever the user typed; the catalogue resolves it
+     * @param email    the login identifier; the catalogue has no username column
      * @param password plaintext, never logged or stored
-     * @return the catalogue's userId, always non-blank — never the submitted username
-     * @throws com.catalogue.verg.core.exception.CustomException 401 on {@code valid:false}, 503 for
-     *         anything else (unreachable, non-2xx, unparseable, or no userId). Fails closed: there is
-     *         no return value meaning "not verified".
+     * @return the catalogue's userId, non-blank — never the submitted email
+     * @throws com.catalogue.verg.core.exception.CustomException 401 when the catalogue rejects the
+     *         credentials, 503 for anything else. Fails closed: no return value means "not verified".
      */
-    String verifyCredentials(String username, String password);
+    String verifyCredentials(String email, String password);
 }

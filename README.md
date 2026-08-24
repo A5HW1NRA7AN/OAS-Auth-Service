@@ -3,25 +3,26 @@
 Token issuance, validation and revocation for the OpenAgriStack catalogue services, backed by Keycloak
 and Redis.
 
-**The split of responsibilities:** the user-catalogue owns users and their passwords. Keycloak holds an
-identity shell per user — the catalogue's `userId` plus `org_id` and `entity_type` — and issues tokens
-for it, storing **no credential of any kind**. This service owns those tokens and their revocation, and
-administers the Keycloak users the catalogue publishes.
-
 Spring Boot 3.3.5, Java 17, no database of its own.
 
-> **This service does not authenticate its callers.** Credential verification is flag-gated: `false`
-> by default (so `auth_token_create` takes `{userId}` and trusts its caller), and **`true` in the
-> deployed environment**, where it takes `{username, password}` and verifies against the
-> user-catalogue. Either way nothing authenticates the *caller*, so every endpoint here is for
-> service-to-service use inside the cluster.
-> See [§4](#4-credential-verification-flag-gated) and [§6](#6-security-posture).
+## Responsibilities
 
-> **⚠️ TEMPORARY (UAT):** for a limited UAT integration window this service **is** exposed through Kong
-> at the shared nginx host (`/auth/v1/*`), gated only by the existing catalogue API keys — no real
-> caller authentication. This deliberately relaxes the "never routed through Kong" rule above and
-> **must be reverted to strictly private before prod** — see the revert checklist in the OAS-Infra repo
-> (`kong/kong.decK.yaml`, block marked `TEMP/UAT`).
+The user-catalogue owns users and their passwords. Keycloak holds an identity shell per user — the
+catalogue's `userId` plus `org_id` and `entity_type` — and issues tokens for it, storing no credential
+of any kind. This service owns those tokens and their revocation, and administers the Keycloak users
+the catalogue publishes.
+
+This service does not authenticate its callers. Access control is network-level only, so every endpoint
+here is intended for service-to-service use inside the cluster. Credential verification of the *end
+user* is a separate concern and is flag-gated: `false` by default, where `auth_token_create` takes
+`{userId}` and trusts its caller, and `true` in the deployed environment, where it takes
+`{email, password}` and verifies against the user-catalogue. See
+[§4](#4-credential-verification-flag-gated) and [§6](#6-security-posture).
+
+For the duration of the UAT integration window this service is reachable through Kong at the shared
+nginx host (`/auth/v1/*`), gated only by the existing catalogue API keys. That is a temporary
+relaxation of the rule above and is tracked for revert in the OAS-Infra repository
+(`kong/kong.decK.yaml`, block marked `TEMP/UAT`); see [§6](#6-security-posture).
 
 ## Contents
 
@@ -61,14 +62,13 @@ Keycloak user:  username = userId
                 credentials = (none)
 ```
 
-The push happens **before** the catalogue persists `ACTIVE`, so a failure here leaves the record at its
+The push happens before the catalogue persists `ACTIVE`, so a failure here leaves the record at its
 previous status and retryable. The reverse order can leave a user the catalogue believes is live but who
 cannot obtain a token, with no clean way to detect it afterwards.
 
 ### Issuing a token
 
-With `catalogue.validate-enabled=false` — the local default, but **not** how the deployed
-environment runs:
+With `catalogue.validate-enabled=false` — the local default, and not how the deployed environment runs:
 
 ```
 caller -> POST /auth/v1/auth_token_create { userId }
@@ -88,9 +88,9 @@ The realm's direct grant flow contains no password step at all. `setup-realm.sh`
 it is gone. That is what makes a password-less grant possible, and it is also why the client secret and
 network isolation are the only things protecting this endpoint — see [§6](#6-security-posture).
 
-With the flag on, one step is added in front: the service asks the user-catalogue to verify the
-username and password, and only the `userId` the catalogue returns reaches Keycloak. Keycloak's own
-role is unchanged, because it still holds no credential. See [§4](#4-credential-verification-flag-gated).
+With the flag on, one step is added in front: the service asks the user-catalogue to verify the email
+and password, and only the `userId` the catalogue returns reaches Keycloak. Keycloak's own role is
+unchanged, because it still holds no credential. See [§4](#4-credential-verification-flag-gated).
 
 ### Validation
 
@@ -134,7 +134,7 @@ java -jar target/svc-auth-0.0.1-SNAPSHOT.jar
 ```
 
 Ordering matters in one place: `setup-realm.sh` generates the client secret, so the application must
-start **after** it with `.env` sourced. Start it first and every call fails with `invalid_client`. The
+start after it with `.env` sourced. Start it first and every call fails with `invalid_client`. The
 script waits for Keycloak itself (about 10 seconds from a cold container), so it is safe to run
 immediately after `docker compose up -d`.
 
@@ -188,7 +188,7 @@ Creates or updates the Keycloak user. Idempotent, and also the re-enable path af
 `firstName` and `lastName` need no mapper: the client keeps Keycloak's built-in `profile` scope, so
 `given_name`, `family_name` and `name` appear in the token as soon as the fields are stored.
 
-**`registries` is the user's list of accessible catalogues, and it is three-state:**
+`registries` is the user's list of accessible catalogues, and it is three-state:
 
 | Sent | Effect |
 |---|---|
@@ -198,34 +198,34 @@ Creates or updates the Keycloak user. Idempotent, and also the re-enable path af
 
 Blank entries and duplicates are dropped; a non-array value is a `400`. Values come from whoever owns
 the permission matrix — this service only carries what it is given and has no opinion about who
-computes it. **Once the catalogue manages registries it must send the key on every publish, and send
-`[]` to revoke:** a caller that stops sending it keeps the previous list forever.
+computes it. Once the catalogue manages registries it must send the key on every publish, and send `[]`
+to revoke: a caller that stops sending it keeps the previous list forever.
 
-`email`, `firstName` and `lastName` are likewise carried forward when omitted. An existing user returns `200` with
-`created: false` rather than a conflict — the caller is a catalogue whose publish is "push here, then
-persist ACTIVE", so every way this response can be lost leaves it believing the push did not happen. A
-409 there would wedge the record permanently. The update rewrites `enabled` and all three attributes, so
-a republish repairs drift.
+`email`, `firstName` and `lastName` are likewise carried forward when omitted. An existing user returns
+`200` with `created: false` rather than a conflict — the caller is a catalogue whose publish is "push
+here, then persist ACTIVE", so every way this response can be lost leaves it believing the push did not
+happen. A 409 there would wedge the record permanently. The update rewrites `enabled` and all three
+attributes, so a republish repairs drift.
 
-`409 AUTH_USER_CONFLICT` means a **different** username already holds that email. Retrying will not fix
-it; the data has to change.
+`409 AUTH_USER_CONFLICT` means a different Keycloak username already holds that email. Retrying will
+not fix it; the data has to change.
 
 ### POST /auth/v1/auth_token_create
 
-The body depends on `catalogue.validate-enabled`, and **the flag alone selects the path** — never the
-shape of the body.
+The body depends on `catalogue.validate-enabled`, and the flag alone selects the path — never the shape
+of the body.
 
 ```json
 { "userId": "user-000000000001" }                      // flag off (default): trusts the caller
-{ "username": "asha@example.org", "password": "..." }  // flag on: verified by the catalogue
+{ "email": "asha@example.org", "password": "..." }     // flag on: verified by the catalogue
 ```
 
 Returns Keycloak's token response verbatim (`access_token`, `refresh_token`, `expires_in`, …).
 
-With the flag on, a `userId` in the body is **ignored**: the token is issued for the `userId` the
-catalogue returned. Honouring the body's value would let one valid password mint a token for any other
-account. Sending only `{userId}` while the flag is on is a `400`, not a fallback — otherwise any caller
-could downgrade out of verification. See [§4](#4-credential-verification-flag-gated).
+With the flag on, a `userId` in the body is ignored: the token is issued for the `userId` the catalogue
+returned. Honouring the body's value would let one valid password mint a token for any other account.
+Sending only `{userId}` while the flag is on is a `400`, not a fallback — otherwise any caller could
+downgrade out of verification. See [§4](#4-credential-verification-flag-gated).
 
 ### POST /auth/v1/auth_token_validate
 
@@ -273,8 +273,8 @@ token so the rest of its session can still be killed.
 
 Denylists the user and every indexed session, then disables the user in Keycloak.
 
-**This takes the `userId`, not the email** — unlike `auth_token_create`, which takes the email because
-that is what the catalogue matches on. Passing an email here revokes nothing, so it returns
+This takes the `userId`, not the email — unlike `auth_token_create`, which takes the email because that
+is what the catalogue matches on. Passing an email here revokes nothing, so it returns
 `404 AUTH_USER_NOT_FOUND` rather than a misleading success.
 
 A genuine Keycloak failure is different: it returns `200` with `keycloakDisabled: "failed"`, because the
@@ -322,10 +322,10 @@ caller retrying a half-finished cleanup has to be able to complete it.
 `auth_user_create` wrote. `given_name`, `family_name`, `name`, `email` and `email_verified` come from
 Keycloak's built-in `profile` and `email` scopes, with no mapper of ours involved.
 
-`entity_type` and `registries` are both **data, not permissions** — there is no RBAC, and nothing here
-or in Keycloak enforces either. A consumer that wants to gate on `registries` must do so itself.
-Nothing caps the list length, and a few hundred entries would produce a JWT large enough to hit proxy
-header limits downstream.
+`entity_type` and `registries` are both data, not permissions — there is no RBAC, and nothing here or in
+Keycloak enforces either. A consumer that wants to gate on `registries` must do so itself. Nothing caps
+the list length, and a few hundred entries would produce a JWT large enough to hit proxy header limits
+downstream.
 
 ### Errors
 
@@ -338,7 +338,7 @@ header limits downstream.
 | `AUTH_INVALID_CREDENTIALS` | 401 | the catalogue rejected the credentials (its 401 or 403) | re-authenticate |
 | `AUTH_USER_DISABLED` | 403 | blocked in Keycloak | `auth_user_create` re-enables |
 | `AUTH_USER_NOT_FOUND` | 404 | never provisioned, or a wrong identifier on revoke/delete | call `auth_user_create`, or check you sent the userId |
-| `AUTH_USER_CONFLICT` | 409 | another username holds that email | change the data |
+| `AUTH_USER_CONFLICT` | 409 | another Keycloak username holds that email | change the data |
 | `AUTH_IDP_OPERATION_FAILED` | 502 | Keycloak rejected the call | configuration fault; alert |
 | `AUTH_UPSTREAM_UNAVAILABLE` | 503 | Keycloak or the catalogue unreachable, or the catalogue answered something unparseable | retry |
 | `AUTH_REVOCATION_FAILED` | 503 | Redis unreachable | retry |
@@ -359,11 +359,9 @@ nothing can be enumerated, and the distinction is the difference between "your p
 
 ## 4. Credential verification (flag-gated)
 
-The client is built, unit-tested, and written against the contract the catalogue has **deployed**.
-
-**It is `false` by default and `true` in the deployed environment** — enabled in OAS-Infra via
-`services/oas-auth-service.config.yaml`. The default stays `false` so a local stack works without a
-catalogue running.
+`catalogue.validate-enabled` is `false` by default and `true` in the deployed environment, where it is
+set in OAS-Infra via `services/oas-auth-service.config.yaml`. The default stays `false` so a local stack
+works without a catalogue running.
 
 ```properties
 catalogue.validate-enabled=false            # default: auth_token_create takes {userId}, trusts caller
@@ -372,11 +370,11 @@ catalogue.base-url=http://localhost:8082    # the user-catalogue. In-cluster:
 catalogue.verify-path=/user/v1/verify
 ```
 
-With the flag on, `auth_token_create` takes `{username, password}`, calls the catalogue, and issues a
-token only for the `userId` the catalogue returns.
+With the flag on, `auth_token_create` takes `{email, password}`, calls the catalogue, and issues a token
+only for the `userId` the catalogue returns.
 
-**Confirm the mode after enabling it.** Anything Spring does not read as `true` — unset, misspelled,
-`0`, `False`, `"true "` — silently means `false`, and passwords then stop being checked with no error
+Confirm the mode after enabling it. Anything Spring does not read as `true` — unset, misspelled, `0`,
+`False`, `"true "` — silently means `false`, and passwords then stop being checked with no error
 anywhere. Two things make that visible: every call logs `mode=VERIFIED` or `mode=TRUSTED`, and the audit
 line records `SUCCESS` or `SUCCESS_UNVERIFIED`, so an audit stream proves which path served each token.
 
@@ -398,21 +396,20 @@ How this service maps it:
 
 | Catalogue answers | This service returns |
 |---|---|
-| `200` with `result.userId` | the token, issued for **that** userId |
+| `200` with `result.userId` | the token, issued for that userId |
 | `401` or `403` | `401 AUTH_INVALID_CREDENTIALS` — collapsed, so a caller cannot tell a blocked account from a wrong password |
-| `200` with no `userId` | `503`, and never a token for the submitted username |
+| `200` with no `userId` | `503`, and never a token for the submitted email |
 | `400`, `404`, `5xx`, unreachable, unparseable | `503`, fail closed |
 
-Two deliberate choices. **Only `401`/`403` count as a rejection** — everything else is an outage,
-because reporting `401` for an unreadable response would blame the user's password and hide the fault,
-and a missing Kong route produces exactly that `404`. And the field on the wire is `email` while **our**
-endpoint still takes `username`, so whatever the user typed is forwarded verbatim and the catalogue
-decides how to resolve it. That schema has no `username` column — only `email` and the generated
-`userId`.
+Two deliberate choices. Only `401`/`403` count as a rejection — everything else is an outage, because
+reporting `401` for an unreadable response would blame the user's password and hide the fault, and a
+missing Kong route produces exactly that `404`. And the login identifier is the email: the catalogue's
+schema has no username column, only `email` and the generated `userId`, so the email is forwarded
+verbatim and the catalogue decides how to resolve it.
 
-The catalogue is reached **in-cluster**, so the request never traverses Kong and needs no API key.
+The catalogue is reached in-cluster, so the request never traverses Kong and needs no API key.
 
-**`/user/v1/verify` has no Kong route, deliberately.** It accepts plaintext passwords and returns a
+`/user/v1/verify` has no Kong route, deliberately. It accepts plaintext passwords and returns a
 credential verdict, and with the in-cluster path nothing external needs it. Kong's route regexes list
 actions explicitly and `verify` is in neither list, so an external call gets `404 no Route matched` and
 never reaches the pod — the intended posture, not a bug. Test it with
@@ -420,14 +417,12 @@ never reaches the pod — the intended posture, not a bug. Test it with
 
 Three things the catalogue owns that are worth tracking:
 
-1. It reads the password hash from **Elasticsearch**, not Postgres, so a user with a missing or stale
-   index document cannot log in even with the right password — and the failure looks like a wrong
-   password.
-2. Its `401` vs `403` split tells a direct caller whether an account exists. This service collapses
-   the two, but anything calling the catalogue directly still sees it.
-3. `password` and `pin` are now indexed in Elasticsearch, and `/user/v1/search` takes
-   `requestedFields` from the request body with no denylist — so a read-scoped API key can retrieve
-   every user's stored hashes.
+1. It reads the password hash from Elasticsearch, not Postgres, so a user with a missing or stale index
+   document cannot log in even with the right password — and the failure looks like a wrong password.
+2. Its `401` vs `403` split tells a direct caller whether an account exists. This service collapses the
+   two, but anything calling the catalogue directly still sees it.
+3. `password` and `pin` are indexed in Elasticsearch, and `/user/v1/search` takes `requestedFields` from
+   the request body with no denylist — so a read-scoped API key can retrieve every user's stored hashes.
 
 ---
 
@@ -438,18 +433,18 @@ Nothing in the catalogue talks to Keycloak, and Keycloak does not call the catal
 
 | Catalogue event | Call | Notes |
 |---|---|---|
-| publish, status becomes `ACTIVE` | `auth_user_create` | **before** persisting ACTIVE; on failure leave the record retryable |
+| publish, status becomes `ACTIVE` | `auth_user_create` | before persisting ACTIVE; on failure leave the record retryable |
 | `ACTIVE -> INACTIVE` | `auth_user_revoke` | |
 | `INACTIVE -> ACTIVE` | `auth_user_create` | re-enables and clears the block |
 | record deleted | `auth_user_delete` | |
-| login | `auth_token_create` with `{username, password}` | only when `catalogue.validate-enabled=true` |
+| login | `auth_token_create` with `{email, password}` | only when `catalogue.validate-enabled=true` |
 
-**If the catalogue takes ownership of `registries`, it must send the key on every `auth_user_create`,
-and send `[]` to revoke access.** Omitting it means "keep what is stored", which is right for a caller
-that does not manage the list but wrong for one that does — a revocation made in the catalogue's own
-database would otherwise leave the old claim in every token issued afterwards.
+If the catalogue takes ownership of `registries`, it must send the key on every `auth_user_create`, and
+send `[]` to revoke access. Omitting it means "keep what is stored", which is right for a caller that
+does not manage the list but wrong for one that does — a revocation made in the catalogue's own database
+would otherwise leave the old claim in every token issued afterwards.
 
-Use a `RestTemplate` **with timeouts** — a shared bean usually has none, and a hung call would hold the
+Use a `RestTemplate` with timeouts. A shared bean usually has none, and a hung call would hold the
 request thread indefinitely. Do not report the raw exception on failure: a connection error message
 contains this service's internal host and port.
 
@@ -460,38 +455,41 @@ again immediately, but the per-session entries are left in place on purpose.
 
 ## 6. Security posture
 
-Read this before deploying.
-
-**Nothing here authenticates its caller.** There is no interceptor, no API key, no mTLS. Access control
-is entirely network-level, by decision. All six endpoints, and Keycloak's token endpoint, must be
+Nothing here authenticates its caller. There is no interceptor, no API key, no mTLS. Access control is
+entirely network-level, by decision. All six endpoints, and Keycloak's token endpoint, must be
 unreachable from outside the cluster.
 
-**`auth_token_create` mints a token for any `userId`** while `catalogue.validate-enabled` is `false`,
-which is the default. A single misconfigured Kong route is then a full authentication bypass for every
+During the UAT integration window that property does not hold: the service is routed through Kong at
+the shared nginx host (`/auth/v1/*`) behind the existing catalogue API keys, which authenticate a
+client but not an end user. The revert is tracked in OAS-Infra (`kong/kong.decK.yaml`, block marked
+`TEMP/UAT`) and must be completed before production.
+
+`auth_token_create` mints a token for any `userId` while `catalogue.validate-enabled` is `false`, which
+is the default. A single misconfigured Kong route is then a full authentication bypass for every
 account. Turning the flag on is the fix; until then the network is the only control.
 
-**The flag is silent when it is wrong.** A missing or misspelled `CATALOGUE_VALIDATE_ENABLED` reverts to
+The flag is silent when it is wrong. A missing or misspelled `CATALOGUE_VALIDATE_ENABLED` reverts to
 trusting the caller and still returns a token — the only failure in this service whose wrong outcome is a
 200. Grep the log for `mode=VERIFIED` after any deployment that expects verification.
 
-**The `oas-auth-service` client secret is the boundary.** Because the realm's direct grant flow checks
-no credential, anyone holding that secret can obtain a token for any user in the realm. Treat it as a
-root credential: `setup-realm.sh` writes it to `.env` (gitignored) and regenerating it is a re-run away.
+The `oas-auth-service` client secret is the boundary. Because the realm's direct grant flow checks no
+credential, anyone holding that secret can obtain a token for any user in the realm. Treat it as a root
+credential: `setup-realm.sh` writes it to `.env` (gitignored) and regenerating it is a re-run away.
 
-**Keycloak's `admin-cli` is the trap to know about.** `directGrantFlow` is a realm-wide binding, and
-Keycloak auto-creates a **public** `admin-cli` client with direct access grants enabled in every realm.
-With no password step in the flow, this issues a live token for any user with no secret and no password:
+Keycloak's `admin-cli` client needs specific attention. `directGrantFlow` is a realm-wide binding, and
+Keycloak auto-creates a public `admin-cli` client with direct access grants enabled in every realm. With
+no password step in the flow, this issues a live token for any user with no secret and no password:
 
 ```
 POST /realms/OAS/protocol/openid-connect/token
 grant_type=password&client_id=admin-cli&username=<any userId>
 ```
 
-Verified against Keycloak 26.7 — it really does return a token. `setup-realm.sh` disables direct access
-grants on every client except `oas-auth-service` and then **fails loudly** if any other client still has
-it, because a rebuilt realm recreates `admin-cli` with the flag back on. Do not remove that assertion.
+Verified against Keycloak 26.7 — it does return a token. `setup-realm.sh` disables direct access grants
+on every client except `oas-auth-service` and then fails loudly if any other client still has it,
+because a rebuilt realm recreates `admin-cli` with the flag back on. Do not remove that assertion.
 
-**MFA is structurally impossible in this realm** while Keycloak holds no credentials.
+MFA is structurally impossible in this realm while Keycloak holds no credentials.
 
 ---
 
@@ -522,22 +520,22 @@ Everything is environment-driven with a local default.
 | `SERVER_PORT` | 8080 | 8080 |
 | `SPRING_REDIS_HOST` / `_PORT` | `localhost` / `6380` | the Redis host |
 | `KEYCLOAK_BASE_URL` | `http://localhost:8180` | `http://keycloak:8080` (Service DNS) |
-| `KEYCLOAK_ISSUER` | `http://localhost:8180/realms/OAS` | the **public** ingress URL |
+| `KEYCLOAK_ISSUER` | `http://localhost:8180/realms/OAS` | the public ingress URL |
 | `KEYCLOAK_REALM` | `OAS` | `OAS` |
 | `KEYCLOAK_CLIENT_ID` | `oas-auth-service` | same |
 | `KEYCLOAK_CLIENT_SECRET` | from `.env` | from a Secret |
 | `KEYCLOAK_CONNECT_TIMEOUT_MS` / `_READ_TIMEOUT_MS` | 2000 / 5000 | tune as needed |
 | `KEYCLOAK_CLOCK_SKEW_SECONDS` | 30 | 30 |
 | `KEYCLOAK_DENYLIST_SID_TTL_SECONDS` | 900 | at least the SSO session max |
-| `CATALOGUE_VALIDATE_ENABLED` | `false` | `true` once the catalogue exposes `/user/v1/verify` |
-| `CATALOGUE_BASE_URL` | `http://localhost:8082` | `http://user-catalogue:8080` (Service DNS, **not** the public host) |
+| `CATALOGUE_VALIDATE_ENABLED` | `false` | `true` |
+| `CATALOGUE_BASE_URL` | `http://localhost:8082` | `http://org-user-notification-services.app.svc.cluster.local:8080` (Service DNS, not the public host) |
 | `CATALOGUE_VERIFY_PATH` | `/user/v1/verify` | same |
 | `CATALOGUE_CONNECT_TIMEOUT_MS` / `_READ_TIMEOUT_MS` | 2000 / 5000 | the read timeout is the login latency ceiling |
 
 `KEYCLOAK_BASE_URL` (how this service reaches Keycloak) and `KEYCLOAK_ISSUER` (what Keycloak stamps into
 tokens) are separate on purpose. See [§12](#12-known-pitfalls).
 
-The service authenticates to Keycloak's admin API using its **own client's service account**
+The service authenticates to Keycloak's admin API using its own client's service account
 (`client_credentials`), holding only `manage-users` and `view-users`. There are no admin credentials
 anywhere in the application.
 
@@ -560,8 +558,8 @@ anywhere in the application.
 The `Dockerfile` builds the jar and runs it as a non-root user. Jenkins builds this Dockerfile directly;
 there is no separate Maven stage.
 
-Readiness intentionally does **not** depend on Keycloak or Redis. A green readiness probe therefore does
-not mean logins work — those failures surface as 503 on the endpoints instead.
+Readiness intentionally does not depend on Keycloak or Redis. A green readiness probe therefore does not
+mean logins work — those failures surface as 503 on the endpoints instead.
 
 ### Keycloak
 
@@ -575,8 +573,8 @@ ingress. Do not expose the token endpoint publicly.
 `setup-realm.sh` is idempotent and environment-driven (`KC`, `REALM`, `CLIENT`, `ADMIN_USER`,
 `ADMIN_PASS`, `KC_WAIT_SECONDS`). Run it once against a deployed Keycloak after its database is
 attached. It creates the realm and client, enables the service account and grants it `manage-users` and
-`view-users`, declares the three custom attributes in the User Profile, creates the `oas-profile` scope
-with its mappers and the audience mapper, strips the password step from the direct grant flow, disables
+`view-users`, declares the custom attributes in the User Profile, creates the `oas-profile` scope with
+its mappers and the audience mapper, strips the password step from the direct grant flow, disables
 direct access grants on every other client, turns off email login, and verifies all of it.
 
 The realm lives only in the `kcdata` volume, so `docker compose down -v` destroys it and this script is
@@ -587,7 +585,7 @@ how you rebuild it. Re-run it after any upgrade that recreates the realm.
 ## 10. Testing
 
 ```bash
-./mvnw test        # 93 tests
+./mvnw test        # 90 tests
 ```
 
 | Class | Covers |
@@ -598,40 +596,44 @@ how you rebuild it. Re-run it after any upgrade that recreates the realm.
 | `CatalogueServiceImplTest` | the credential check: which responses issue a token, which are 401, which are 503, and that the password never reaches a log |
 
 All container-free: an RSA key pair is generated in-process, tokens are minted with java-jwt, and
-Keycloak and Redis are mocked. The suite runs in a few seconds, so there is no excuse not to run it.
+Keycloak and Redis are mocked. The suite runs in a few seconds.
 
-One Postman collection, in two flavours that differ only by environment:
+One Postman collection, plus a local-only variant that differs from it only by environment:
 
 ```
-postman/local/      auth-service :8080, catalogue :8082, no API key
-postman/deployed/   both behind the shared nginx host, gated by a Kong API key
+postman/OAS_Auth_Service.*             deployed: both services behind the shared nginx host, Kong API key
+postman/OAS_Auth_Service_local_test.*  auth-service :8080, catalogue :8082, no API key (gitignored)
 ```
 
-Import the collection **and** the environment from one directory, or:
+Import a collection with the environment of the same name, or:
 
 ```bash
-newman run postman/local/OAS_Auth_Service.postman_collection.json \
-       -e postman/local/OAS_Auth_Service.postman_environment.json
+newman run postman/OAS_Auth_Service.postman_collection.json \
+       -e postman/OAS_Auth_Service.postman_environment.json
 ```
 
-**Self-contained — there is nothing to fill in.** Step 2 creates its own catalogue user with a fresh
-email each run and captures the userId, email and password; step 14 soft-deletes it, so it is
-repeatable. The only value you may need to supply is `api_key`, in the deployed environment only, and
-it must be an **editors**-scoped key because step 2 uses the catalogue's write route.
+The collection logs in with `{email, password}`, so it requires `CATALOGUE_VALIDATE_ENABLED=true` and a
+reachable catalogue. With the flag off, step 4 correctly returns `400`, because the flag alone selects
+the path ([§4](#4-credential-verification-flag-gated)).
 
-14 requests, 19 assertions. The two that earn their place:
+It is otherwise self-contained; there is nothing to fill in. Step 2 creates its own catalogue user with
+a fresh email each run and captures the userId, email and password; step 14 soft-deletes it, so it is
+repeatable. The only value you may need to supply is `api_key`, which must be an editors-scoped key
+because step 2 uses the catalogue's write route.
+
+14 requests, 19 assertions. Two are worth calling out.
 
 ```js
 pm.expect(r.registries).to.eql(["cropCatalogue", "seasonCatalogue"]);   // step 5
 ```
 
 fails if either the protocol mapper or the User Profile declaration is single-valued — the one bug in
-this area that is otherwise silent, because Keycloak then sends only the first value and logs nothing
-but a warning. And step 2 asserting the stored password is a bcrypt hash rather than the plaintext it
-was sent, which is the only check that the catalogue is hashing at all.
+this area that is otherwise silent, because Keycloak then sends only the first value and logs nothing but
+a warning. And step 2 asserts the stored password is a bcrypt hash rather than the plaintext it was
+sent, which is the only check that the catalogue is hashing at all.
 
-The run is also an integration test of both services: step 2 only succeeds if the catalogue's own call
-to `auth_user_create` succeeded, so a green step 2 means the two are talking. Steps 9 and 13 are the
+The run is also an integration test of both services: step 2 only succeeds if the catalogue's own call to
+`auth_user_create` succeeded, so a green step 2 means the two are talking. Steps 9 and 13 are the
 interesting failures — the catalogue keeps authenticating a user that Keycloak has disabled or deleted,
 so those requests fail at Keycloak, which is the two stores being independent.
 
@@ -682,14 +684,14 @@ Each of these was hit during development. The symptom is misleading in every cas
 
 **The issuer trap.** Keycloak stamps `iss` with whatever URL was used to reach it. If this service calls
 Keycloak by one hostname but expects another, every token fails with `AUTH_TOKEN_INVALID`, which reads
-like a signature problem and is not. Reproduced: reaching Keycloak at `host.docker.internal:8180` while
-`KEYCLOAK_ISSUER` said `localhost:8180`. Pin `KC_HOSTNAME` on Keycloak so it always stamps the same
-public issuer, and point `KEYCLOAK_ISSUER` at that value.
+like a signature problem and is not. Reproduced by reaching Keycloak at `host.docker.internal:8180`
+while `KEYCLOAK_ISSUER` said `localhost:8180`. Pin `KC_HOSTNAME` on Keycloak so it always stamps the
+same public issuer, and point `KEYCLOAK_ISSUER` at that value.
 
 **Undeclared user attributes are silently dropped.** On Keycloak 24+ writing an attribute the realm's
 User Profile does not declare returns `201 Created` with the attribute simply absent — no error, no log
 line. If tokens arrive without `user_id`, `org_id` or `entity_type`, this is the first thing to check.
-`setup-realm.sh` declares all three and asserts them.
+`setup-realm.sh` declares all of them and asserts them.
 
 **A required profile attribute breaks token issuance.** Keycloak declares `email`, `firstName` and
 `lastName` as required for the `user` role by default. An incomplete profile raises a `VERIFY_PROFILE`
@@ -712,10 +714,10 @@ both come back as `400 invalid_grant`. This service collapses all 4xx before map
 responses are unaffected — but anything asserting on Keycloak's raw status will be wrong.
 
 **A single-valued mapper silently truncates `registries`.** If the protocol mapper's `multivalued` is
-`"false"` while the attribute holds several values, Keycloak 26.7 puts **only the first** in the token and
+`"false"` while the attribute holds several values, Keycloak 26.7 puts only the first in the token and
 logs nothing but a `KC-SERVICES0046` warning. A wrong access list, invisible to every caller. Two related
 traps: `multivalued: false` in the User Profile installs an implicit `max: 1` validator that rejects a
-two-value write with a 400, and declaring the `multivalued` *validator* explicitly makes `max` mandatory
+two-value write with a 400, and declaring the `multivalued` validator explicitly makes `max` mandatory
 or the profile `PUT` itself is rejected. `setup-realm.sh` sets all of this and asserts both halves.
 
 **An admin `PUT` that includes `attributes` but omits a key deletes that attribute.** This is why
@@ -728,8 +730,8 @@ and "empty access list" as the same thing.
 
 **`auth_token_create` takes the email; every other endpoint takes the userId.** That asymmetry is the
 easiest thing here to get wrong, because the catalogue has no username column and matches on `email`,
-while Keycloak's username *is* the catalogue's `userId`. Revoking with an email used to look like a
-success while blocking nobody; it now returns 404.
+while Keycloak's username is the catalogue's `userId`. Revoking with an email used to look like a success
+while blocking nobody; it now returns 404.
 
 **A stale `.env` presents as a 401 on every call.** `setup-realm.sh` regenerates the client secret when
 it recreates the client. Re-source `.env` and restart afterwards.
@@ -741,16 +743,16 @@ it recreates the client. Re-source `.env` and restart afterwards.
 
 ## 13. Not implemented
 
-- **The catalogue's `/user/v1/verify` endpoint.** Our side is built and tested; the catalogue team owns
-  that endpoint, and it needs a password-hashing dependency that repo does not currently have. Until it
-  exists, `catalogue.validate-enabled` stays `false` and no password is checked anywhere —
-  see [§4](#4-credential-verification-flag-gated).
 - **The permission matrix.** Who computes a user's `registries` is not decided here. Today it is static
   data in the UI; this service carries whatever list it is handed.
 - **Nothing enforces these tokens.** Catalogue endpoints are still open. This service gives you a way to
-  *get* and *check* a token, not a requirement to *have* one. The interceptor that calls
-  `auth_token_validate` on protected paths is the next piece of work, and is what will finally let
-  catalogue audit rows carry a real actor instead of `ANONYMOUS`.
+  get and check a token, not a requirement to have one. An interceptor calling `auth_token_validate` on
+  protected paths is the piece that would let catalogue audit rows carry a real actor instead of
+  `ANONYMOUS`.
+- **Revocation is not yet wired from the catalogue.** The catalogue calls `auth_user_create` on publish,
+  but its status toggle and delete paths do not yet call `auth_user_revoke` and `auth_user_delete`, so
+  blocking a user leaves their existing tokens valid until they expire. Both endpoints here are built
+  and tested; only the calls are missing.
 - **No caller authentication on these endpoints.** Network isolation only — see [§6](#6-security-posture).
 - **No RBAC.** `entity_type` is a claim, not a permission.
 - **No MFA**, and it cannot be added while Keycloak holds no credentials.

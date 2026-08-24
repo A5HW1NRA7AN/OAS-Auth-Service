@@ -6,10 +6,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
- * Application tunables, bound from the environment.
- *
- * <p>Connection settings used to build clients live in the relevant {@code config} class
- * (see {@code core/keycloak/config/KeycloakConfig}); this holds the values the service logic reads.
+ * Application tunables bound from the environment. Client connection settings live in the relevant
+ * {@code config} class; this holds the values the service logic reads.
  */
 @Component
 @Getter

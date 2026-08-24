@@ -13,9 +13,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Builds the clients used to talk to Keycloak.
- */
+/** Builds the clients used to talk to Keycloak. */
 @Configuration
 public class KeycloakConfig {
 
@@ -32,10 +30,8 @@ public class KeycloakConfig {
     private int readTimeoutMs;
 
     /**
-     * A dedicated RestTemplate with timeouts. Spring supplies no timeouts by default, so a hung
-     * Keycloak would hold the request thread indefinitely.
-     *
-     * <p>setConnectTimeout/setReadTimeout, not the shorter names — those are Spring Boot 3.4+.
+     * Dedicated RestTemplate with timeouts: Spring supplies none, so a hung Keycloak would hold the
+     * request thread indefinitely. The long setter names are required below Boot 3.4.
      */
     @Bean
     public RestTemplate keycloakRestTemplate() {
@@ -46,10 +42,8 @@ public class KeycloakConfig {
     }
 
     /**
-     * Supplies Keycloak's public signing keys, so tokens can be verified without calling Keycloak.
-     *
-     * <p>Caching survives Keycloak's key rotation without an application restart; the rate limit
-     * stops tokens carrying made-up {@code kid} values from becoming a flood of outbound requests.
+     * Supplies Keycloak's signing keys so tokens verify without calling it. The cache is keyed by
+     * kid, so a rotated key is simply a miss; the rate limit caps forged-kid lookups.
      */
     @Bean
     public JwkProvider jwkProvider() {

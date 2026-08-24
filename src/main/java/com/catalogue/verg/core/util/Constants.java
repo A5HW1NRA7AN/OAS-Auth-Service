@@ -1,12 +1,10 @@
 package com.catalogue.verg.core.util;
 
 /**
- * Request field names and the client-facing error codes.
+ * Request field names and client-facing error codes.
  *
- * <p>The messages are fixed strings. They never carry the underlying exception text and never
- * Keycloak's own error_description — those leak internal hostnames, and in the credential case they
- * would distinguish "no such user" from "wrong password" from "account disabled", which lets someone
- * enumerate valid usernames and learn that their guessing is working.
+ * <p>Messages are fixed strings, never the underlying exception or Keycloak's error_description:
+ * those leak internal hostnames and would let a caller tell "no such user" from "wrong password".
  */
 public final class Constants {
 
@@ -15,9 +13,8 @@ public final class Constants {
 
     public static final String SUCCESS = "success";
 
-    // Request fields. auth_token_create accepts a credential only when
-    // catalogue.validate-enabled is true; no other endpoint here takes one.
-    public static final String AUTH_FIELD_USERNAME = "username";
+    // Request fields. Only auth_token_create takes a credential, and only when
+    // catalogue.validate-enabled is true. The login identifier is the email.
     public static final String AUTH_FIELD_PASSWORD = "password";
     public static final String AUTH_FIELD_TOKEN = "token";
     public static final String AUTH_FIELD_REFRESH_TOKEN = "refreshToken";

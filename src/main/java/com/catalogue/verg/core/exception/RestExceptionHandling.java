@@ -2,7 +2,7 @@ package com.catalogue.verg.core.exception;
 
 
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -22,9 +22,7 @@ public class RestExceptionHandling {
             // Check if the CustomException provides an HTTP status code
             if (CustomException != null) {
                 try {
-                    // Guard against null: a CustomException built without a status would otherwise
-                    // reach `new ResponseEntity<>(body, null)` below, which throws and turns a
-                    // handled error into an opaque 500.
+                    // A null status would reach ResponseEntity below and turn a handled error into a 500.
                     if (CustomException.getHttpStatusCode() != null) {
                         status = CustomException.getHttpStatusCode();
                     }
