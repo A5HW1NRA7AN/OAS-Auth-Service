@@ -11,8 +11,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * The auth-service API. Every endpoint is for service-to-service use and none authenticate their
- * caller, so none may be routed through an ingress — see the README.
+ * The auth-service API, for service-to-service use. Only {@code auth_token_create} checks a
+ * credential (and only while {@code catalogue.validate-enabled} is on); the {@code auth_user_*}
+ * endpoints authenticate no caller at all, so they must not be reachable from an ingress —
+ * see the README.
  */
 @RestController
 @RequestMapping("/auth")
@@ -21,7 +23,8 @@ public class AuthController {
     @Autowired
     private AuthService authService;
 
-    /** userId -> tokens. Verifying the password is the caller's job; see AuthServiceImpl. */
+    /** {email, password} -> tokens, the password verified by the user-catalogue. Falls back to
+     *  {userId} on trust when {@code catalogue.validate-enabled} is off; see AuthServiceImpl. */
     @PostMapping("/v1/auth_token_create")
     public ResponseEntity<CustomResponse> authTokenCreate(@RequestBody JsonNode tokenDetails) {
         CustomResponse response = authService.authTokenCreate(tokenDetails);
