@@ -112,39 +112,37 @@ class AuthServiceImplTest {
             "{}",
             "{\"userId\":\"user-1\"}",
             "{\"userId\":\"user-1\",\"orgId\":\"org-1\"}",
-            "{\"orgId\":\"org-1\",\"entityType\":\"MAKER\"}"
+            "{\"orgId\":\"org-1\",\"functionalRole\":\"MAKER\",\"email\":\"a@b.example\"}",
+            // The email is the login identifier the catalogue checks a password against, so a user
+            // published without one could never authenticate.
+            "{\"userId\":\"user-1\",\"orgId\":\"org-1\",\"functionalRole\":\"MAKER\"}",
+            // The hard rename: entityType is the OLD name and buys no compatibility. If this body
+            // ever succeeds, someone has quietly re-added a fallback.
+            "{\"userId\":\"user-1\",\"orgId\":\"org-1\",\"entityType\":\"MAKER\",\"email\":\"a@b.example\"}"
     })
-    @DisplayName("user create requires userId, orgId and entityType")
+    @DisplayName("user create requires userId, orgId, functionalRole and email — and rejects the old entityType")
     void userCreateRequiresIdentifiers(String body) {
-        // orgId and entityType are required because a Keycloak user missing them mints tokens with a
-        // null org_id, and every downstream tenant check then silently sees "no org".
+        // orgId and functionalRole are required because a Keycloak user missing them mints tokens
+        // with a null org_id, and every downstream tenant check then silently sees "no org".
         assertThatThrownBy(() -> service.authUserCreate(json(body)))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_REQUEST);
-        verify(keycloakService, never()).upsertUser(anyString(), anyString(), anyString(), any(), any(), any(), any());
+        verify(keycloakService, never()).upsertUser(any());
     }
 
     @Test
     @DisplayName("user create reports whether the user was created or updated")
     void userCreateReportsCreatedFlag() {
         String body = "{\"userId\":\"" + USER_ID + "\",\"orgId\":\"org-1\","
-                + "\"entityType\":\"MAKER\",\"email\":\"a@b.example\"}";
+                + "\"functionalRole\":\"MAKER\",\"email\":\"a@b.example\"}";
+        var expected = new KeycloakService.CatalogueUser(
+                USER_ID, "org-1", "MAKER", "a@b.example", null, null, null, null);
 
-        when(keycloakService.upsertUser(USER_ID, "org-1", "MAKER", "a@b.example", null, null, null)).thenReturn(true);
+        when(keycloakService.upsertUser(expected)).thenReturn(true);
         assertThat(service.authUserCreate(json(body)).getResult()).containsEntry("created", true);
 
-        when(keycloakService.upsertUser(USER_ID, "org-1", "MAKER", "a@b.example", null, null, null)).thenReturn(false);
+        when(keycloakService.upsertUser(expected)).thenReturn(false);
         assertThat(service.authUserCreate(json(body)).getResult()).containsEntry("created", false);
-    }
-
-    @Test
-    @DisplayName("email is optional — the catalogue may not have one")
-    void userCreateAcceptsMissingEmail() {
-        String body = "{\"userId\":\"" + USER_ID + "\",\"orgId\":\"org-1\",\"entityType\":\"MAKER\"}";
-
-        service.authUserCreate(json(body));
-
-        verify(keycloakService).upsertUser(USER_ID, "org-1", "MAKER", null, null, null, null);
     }
 
     // ── auth_user_revoke ───────────────────────────────────────────────────────────────────────
@@ -335,49 +333,45 @@ class AuthServiceImplTest {
         verify(keycloakService, never()).requestToken(anyString());
     }
 
-    // ── the optional profile fields and registries ────────────────────────────────────────────
+    // ── the optional profile fields ───────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("firstName, lastName and registries are passed through")
+    @DisplayName("every field lands in its own component — eight positional values transpose silently")
     void userCreatePassesOptionalFields() {
+        // Deliberately all-distinct and all-recognisable: with six consecutive Strings on the
+        // record, a swapped pair compiles and only a value-by-value assertion can see it.
         service.authUserCreate(json("{\"userId\":\"" + USER_ID + "\",\"orgId\":\"org-1\","
-                + "\"entityType\":\"MAKER\",\"firstName\":\"Asha\",\"lastName\":\"Rao\","
-                + "\"registries\":[\"reg-a\",\"reg-b\"]}"));
+                + "\"functionalRole\":\"MAKER\",\"email\":\"asha@example.org\","
+                + "\"firstName\":\"Asha\",\"lastName\":\"Rao\","
+                + "\"orgName\":\"Bharat Agri\",\"displayName\":\"FIELD_OFFICER\"}"));
 
-        verify(keycloakService).upsertUser(USER_ID, "org-1", "MAKER", null,
-                "Asha", "Rao", List.of("reg-a", "reg-b"));
+        verify(keycloakService).upsertUser(new KeycloakService.CatalogueUser(
+                USER_ID, "org-1", "MAKER", "asha@example.org",
+                "Asha", "Rao", "Bharat Agri", "FIELD_OFFICER"));
     }
 
     @Test
-    @DisplayName("registries are trimmed and de-duplicated in first-seen order")
-    void userCreateSanitisesRegistries() {
-        // Keycloak validates length 1..64 per value, so a blank would surface as a confusing 502.
+    @DisplayName("absent optional fields are null, so the stored value carries forward")
+    void userCreateOmitsAbsentOptionalFields() {
+        // Null, never "" — a blank would fail Keycloak's min-length validator with a 400 that
+        // adminFailure has no branch for and would report as a bare 502.
         service.authUserCreate(json("{\"userId\":\"" + USER_ID + "\",\"orgId\":\"org-1\","
-                + "\"entityType\":\"MAKER\",\"registries\":[\"reg-b\",\" \",\"reg-a\",\"reg-b\",\" reg-a \"]}"));
+                + "\"functionalRole\":\"MAKER\",\"email\":\"asha@example.org\"}"));
 
-        verify(keycloakService).upsertUser(USER_ID, "org-1", "MAKER", null, null, null,
-                List.of("reg-b", "reg-a"));
+        verify(keycloakService).upsertUser(new KeycloakService.CatalogueUser(
+                USER_ID, "org-1", "MAKER", "asha@example.org", null, null, null, null));
     }
 
     @Test
-    @DisplayName("an empty registries array is passed through as empty, meaning clear")
-    void userCreateEmptyRegistriesMeansClear() {
-        // Distinct from absent, which is null and means "leave what is stored alone".
+    @DisplayName("an explicit null displayName is treated as absent, not as a clear")
+    void userCreateTreatsExplicitNullAsAbsent() {
+        // displayName is nullable upstream, so a serialiser may well emit it. Retries are the norm
+        // on this endpoint, and a stray null must not erase a name the catalogue itself set.
         service.authUserCreate(json("{\"userId\":\"" + USER_ID + "\",\"orgId\":\"org-1\","
-                + "\"entityType\":\"MAKER\",\"registries\":[]}"));
+                + "\"functionalRole\":\"MAKER\",\"email\":\"asha@example.org\",\"displayName\":null}"));
 
-        verify(keycloakService).upsertUser(USER_ID, "org-1", "MAKER", null, null, null, List.of());
-    }
-
-    @Test
-    @DisplayName("a non-array registries value is a 400, not a silent single-element list")
-    void userCreateRejectsNonArrayRegistries() {
-        assertThatThrownBy(() -> service.authUserCreate(json("{\"userId\":\"" + USER_ID + "\","
-                + "\"orgId\":\"org-1\",\"entityType\":\"MAKER\",\"registries\":\"reg-a\"}")))
-                .isInstanceOf(CustomException.class)
-                .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_REQUEST);
-        verify(keycloakService, never())
-                .upsertUser(anyString(), anyString(), anyString(), any(), any(), any(), any());
+        verify(keycloakService).upsertUser(new KeycloakService.CatalogueUser(
+                USER_ID, "org-1", "MAKER", "asha@example.org", null, null, null, null));
     }
 
     // ── auth_token_validate reads the new claims ──────────────────────────────────────────────
@@ -404,40 +398,56 @@ class AuthServiceImplTest {
     }
 
     @Test
-    @DisplayName("a multi-valued registries claim comes back as a list")
-    void validateReturnsRegistriesAsList() {
+    @DisplayName("every OAS claim is surfaced, under its new name")
+    void validateReturnsTheOasClaims() {
         when(keycloakService.verifyToken(anyString(), org.mockito.ArgumentMatchers.anyBoolean()))
-                .thenReturn(tokenWith("{\"registries\":[\"reg-a\",\"reg-b\"]}"));
+                .thenReturn(tokenWith("{\"user_id\":\"" + USER_ID + "\",\"org_id\":\"org-1\","
+                        + "\"org_name\":\"Bharat Agri\",\"functional_role\":\"MAKER\","
+                        + "\"display_name\":\"FIELD_OFFICER\"}"));
 
         CustomResponse response = service.authTokenValidate(json("{\"token\":\"x\"}"));
 
-        assertThat(response.getResult()).containsEntry("registries", List.of("reg-a", "reg-b"));
+        assertThat(response.getResult())
+                .containsEntry("user_id", USER_ID)
+                .containsEntry("org_id", "org-1")
+                .containsEntry("org_name", "Bharat Agri")
+                .containsEntry("functional_role", "MAKER")
+                .containsEntry("display_name", "FIELD_OFFICER");
+        // The rename is only total when the retired keys appear nowhere in the response.
+        assertThat(response.getResult()).doesNotContainKeys("entity_type", "registries");
     }
 
     @Test
-    @DisplayName("an absent registries claim is null, never an empty list")
-    void validateReturnsNullForAbsentRegistries() {
-        // Keycloak omits an empty attribute, so [] would assert "holds none" on a silent token.
+    @DisplayName("an absent optional claim is null, never omitted from the response")
+    void validateReturnsNullForAbsentClaims() {
+        // A key that is present-and-null says "the token does not carry this". A key that is simply
+        // missing is indistinguishable from a field this service forgot to surface.
         when(keycloakService.verifyToken(anyString(), org.mockito.ArgumentMatchers.anyBoolean()))
                 .thenReturn(tokenWith("{\"user_id\":\"" + USER_ID + "\"}"));
 
         CustomResponse response = service.authTokenValidate(json("{\"token\":\"x\"}"));
 
-        assertThat(response.getResult()).containsEntry("registries", null);
+        assertThat(response.getResult())
+                .containsEntry("org_name", null)
+                .containsEntry("display_name", null)
+                .containsEntry("functional_role", null);
     }
 
     @Test
-    @DisplayName("the built-in profile claims are surfaced too")
+    @DisplayName("the name claims are first_name/last_name, not Keycloak's given_name/family_name")
     void validateReturnsProfileClaims() {
+        // setup-realm.sh deletes the built-in profile scope's two name mappers, so a token carrying
+        // given_name/family_name means that deletion did not take.
         when(keycloakService.verifyToken(anyString(), org.mockito.ArgumentMatchers.anyBoolean()))
-                .thenReturn(tokenWith("{\"given_name\":\"Asha\",\"family_name\":\"Rao\","
+                .thenReturn(tokenWith("{\"first_name\":\"Asha\",\"last_name\":\"Rao\","
                         + "\"email\":\"asha@example.org\"}"));
 
         CustomResponse response = service.authTokenValidate(json("{\"token\":\"x\"}"));
 
         assertThat(response.getResult())
-                .containsEntry("given_name", "Asha")
-                .containsEntry("family_name", "Rao")
-                .containsEntry("email", "asha@example.org");
+                .containsEntry("first_name", "Asha")
+                .containsEntry("last_name", "Rao")
+                .containsEntry("email", "asha@example.org")
+                .doesNotContainKeys("given_name", "family_name");
     }
 }

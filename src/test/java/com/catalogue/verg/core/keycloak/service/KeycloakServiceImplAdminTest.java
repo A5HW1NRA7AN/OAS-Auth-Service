@@ -49,7 +49,7 @@ class KeycloakServiceImplAdminTest {
 
     private static final String USER_ID = "user-000000000001";
     private static final String ORG_ID = "org-000000000001";
-    private static final String ENTITY_TYPE = "MAKER";
+    private static final String FUNCTIONAL_ROLE = "MAKER";
     private static final String KC_ID = "kc-internal-1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -100,14 +100,26 @@ class KeycloakServiceImplAdminTest {
         return "[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":" + enabled + "}]";
     }
 
-    /** An existing user that already holds registries, for the carry-forward tests. */
-    private String existingUserWithRegistries(String... registries) {
-        StringBuilder array = new StringBuilder();
-        for (String registry : registries) {
-            array.append(array.length() == 0 ? "" : ",").append('"').append(registry).append('"');
-        }
+    /** An existing user already holding the two optional attributes, for the carry-forward tests. */
+    private String existingUserWithAttributes(String orgName, String displayName) {
         return "[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":true,"
-                + "\"attributes\":{\"registries\":[" + array + "]}}]";
+                + "\"attributes\":{\"org_name\":[\"" + orgName + "\"],"
+                + "\"display_name\":[\"" + displayName + "\"]}}]";
+    }
+
+    /** The identifiers-only publish: every optional field null, so it exercises carry-forward. */
+    private KeycloakService.CatalogueUser basicUser() {
+        return userWith(null, null, null, null, null);
+    }
+
+    private KeycloakService.CatalogueUser userWithEmail(String email) {
+        return userWith(email, null, null, null, null);
+    }
+
+    private KeycloakService.CatalogueUser userWith(String email, String firstName, String lastName,
+                                                   String orgName, String displayName) {
+        return new KeycloakService.CatalogueUser(USER_ID, ORG_ID, FUNCTIONAL_ROLE, email,
+                firstName, lastName, orgName, displayName);
     }
 
     private JsonNode capturedBody(HttpMethod method, String urlFragment) throws Exception {
@@ -123,8 +135,8 @@ class KeycloakServiceImplAdminTest {
     void adminTokenIsFetchedOnceAndReused() {
         stubUserLookup(existingUser(true));
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+        service.upsertUser(basicUser());
+        service.upsertUser(basicUser());
 
         verify(restTemplate, times(1))
                 .exchange(contains("/protocol/openid-connect/token"), eq(HttpMethod.POST), any(), eq(Map.class));
@@ -138,8 +150,8 @@ class KeycloakServiceImplAdminTest {
         stubAdminToken(5);
         stubUserLookup(existingUser(true));
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+        service.upsertUser(basicUser());
+        service.upsertUser(basicUser());
 
         // Four, not two: each upsert authorises two admin requests (the lookup and the write), and
         // with nothing cacheable each one fetches its own token. Contrast
@@ -156,7 +168,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.UNAUTHORIZED, "unauthorized",
                         null, null, null));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null))
+        assertThatThrownBy(() -> service.upsertUser(basicUser()))
                 .isInstanceOf(CustomException.class);
 
         assertThat(ReflectionTestUtils.getField(service, "adminAccessTokenExpiresAt"))
@@ -181,11 +193,11 @@ class KeycloakServiceImplAdminTest {
     // ── upsert ─────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    @DisplayName("upsert creates the user with all three attributes and no credential")
+    @DisplayName("upsert creates the user with the required attributes and no credential")
     void upsertCreatesWhenAbsent() throws Exception {
         stubUserLookup("[]");
 
-        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "a@b.example", null, null, null)).isTrue();
+        assertThat(service.upsertUser(userWithEmail("a@b.example"))).isTrue();
 
         JsonNode body = capturedBody(HttpMethod.POST, "/users");
         assertThat(body.path("username").asText()).isEqualTo(USER_ID);
@@ -193,7 +205,7 @@ class KeycloakServiceImplAdminTest {
         assertThat(body.path("emailVerified").asBoolean()).isTrue();
         assertThat(body.path("attributes").path("user_id").get(0).asText()).isEqualTo(USER_ID);
         assertThat(body.path("attributes").path("org_id").get(0).asText()).isEqualTo(ORG_ID);
-        assertThat(body.path("attributes").path("entity_type").get(0).asText()).isEqualTo(ENTITY_TYPE);
+        assertThat(body.path("attributes").path("functional_role").get(0).asText()).isEqualTo(FUNCTIONAL_ROLE);
         // The whole point of this architecture: Keycloak stores no password.
         assertThat(body.has("credentials")).isFalse();
     }
@@ -203,7 +215,7 @@ class KeycloakServiceImplAdminTest {
     void upsertUpdatesAndReEnables() throws Exception {
         stubUserLookup(existingUser(false));
 
-        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null)).isFalse();
+        assertThat(service.upsertUser(basicUser())).isFalse();
 
         JsonNode body = capturedBody(HttpMethod.PUT, "/users/" + KC_ID);
         assertThat(body.path("enabled").asBoolean()).isTrue();
@@ -217,7 +229,7 @@ class KeycloakServiceImplAdminTest {
         // Without this a republish reports success while every login fails until the TTL expires.
         stubUserLookup(existingUser(false));
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+        service.upsertUser(basicUser());
 
         verify(stringRedisTemplate).delete("auth:denylist:user:" + USER_ID);
     }
@@ -230,7 +242,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.CONFLICT, "conflict",
                         null, null, null));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "taken@b.example", null, null, null))
+        assertThatThrownBy(() -> service.upsertUser(userWithEmail("taken@b.example")))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_USER_CONFLICT)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.CONFLICT);
@@ -252,7 +264,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.CONFLICT, "conflict",
                         null, null, null));
 
-        assertThat(service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null)).isFalse();
+        assertThat(service.upsertUser(basicUser())).isFalse();
         verify(restTemplate).exchange(contains("/users/" + KC_ID), eq(HttpMethod.PUT), any(), eq(String.class));
     }
 
@@ -263,7 +275,7 @@ class KeycloakServiceImplAdminTest {
         when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(), eq(String.class)))
                 .thenThrow(new ResourceAccessException("connection refused"));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null))
+        assertThatThrownBy(() -> service.upsertUser(basicUser()))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE)
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.SERVICE_UNAVAILABLE);
@@ -277,7 +289,7 @@ class KeycloakServiceImplAdminTest {
                 .thenThrow(HttpClientErrorException.create(HttpStatus.FORBIDDEN, "forbidden",
                         null, null, null));
 
-        assertThatThrownBy(() -> service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null))
+        assertThatThrownBy(() -> service.upsertUser(basicUser()))
                 .isInstanceOf(CustomException.class)
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_IDP_OPERATION_FAILED);
     }
@@ -296,7 +308,7 @@ class KeycloakServiceImplAdminTest {
                 captor.capture(), eq(String.class));
         JsonNode body = MAPPER.readTree((String) captor.getValue().getBody());
         // Keycloak only touches `attributes` when the key is present, so omitting it preserves
-        // user_id/org_id/entity_type without a read-modify-write.
+        // user_id/org_id/functional_role without a read-modify-write.
         assertThat(body.fieldNames()).toIterable().containsExactly("enabled");
         assertThat(body.path("enabled").asBoolean()).isFalse();
         verify(restTemplate).exchange(contains("/logout"), eq(HttpMethod.POST), any(), eq(String.class));
@@ -431,67 +443,96 @@ class KeycloakServiceImplAdminTest {
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.BAD_GATEWAY);
     }
 
-    // ── registries and the profile fields ──────────────────────────────────────────────────────
+    // ── the profile fields and the two optional attributes ─────────────────────────────────────
 
     @Test
-    @DisplayName("create sends firstName, lastName and registries as a real array")
-    void upsertCreatesWithNamesAndRegistries() throws Exception {
+    @DisplayName("every field lands in its own place — six consecutive Strings transpose silently")
+    void upsertCreatesWithEveryFieldDistinct() throws Exception {
+        // All eight values distinct and recognisable. The record names the components, but its
+        // constructor is still positional, so this is what actually catches a swapped pair.
         stubUserLookup("[]");
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, "a@b.example", "Asha", "Rao",
-                java.util.List.of("reg-a", "reg-b"));
+        service.upsertUser(new KeycloakService.CatalogueUser(
+                "u-1", "o-1", "MAKER", "e@x.example", "FIRST", "LAST", "ORGNAME", "DISPLAYNAME"));
 
         JsonNode body = capturedBody(HttpMethod.POST, "/users");
-        assertThat(body.path("firstName").asText()).isEqualTo("Asha");
-        assertThat(body.path("lastName").asText()).isEqualTo("Rao");
-        JsonNode registries = body.path("attributes").path("registries");
-        assertThat(registries.isArray()).isTrue();
-        assertThat(registries).hasSize(2);
-        assertThat(registries.get(0).asText()).isEqualTo("reg-a");
-        assertThat(registries.get(1).asText()).isEqualTo("reg-b");
+        assertThat(body.path("username").asText()).isEqualTo("u-1");
+        assertThat(body.path("email").asText()).isEqualTo("e@x.example");
+        assertThat(body.path("firstName").asText()).isEqualTo("FIRST");
+        assertThat(body.path("lastName").asText()).isEqualTo("LAST");
+
+        JsonNode attributes = body.path("attributes");
+        assertThat(attributes.path("user_id").get(0).asText()).isEqualTo("u-1");
+        assertThat(attributes.path("org_id").get(0).asText()).isEqualTo("o-1");
+        assertThat(attributes.path("functional_role").get(0).asText()).isEqualTo("MAKER");
+        assertThat(attributes.path("org_name").get(0).asText()).isEqualTo("ORGNAME");
+        assertThat(attributes.path("display_name").get(0).asText()).isEqualTo("DISPLAYNAME");
+        // The rename is only total when the retired names appear nowhere.
+        assertThat(attributes.has("entity_type")).isFalse();
+        assertThat(attributes.has("registries")).isFalse();
+        assertThat(body.has("credentials")).isFalse();
     }
 
     @Test
-    @DisplayName("an update that omits registries carries the existing values forward")
-    void updateOmittingRegistriesCarriesThemForward() throws Exception {
-        // A Keycloak PUT that omits a key DELETES it, so "not mentioned" must mean "keep".
-        stubUserLookup(existingUserWithRegistries("old-1", "old-2"));
+    @DisplayName("absent optional attributes are omitted entirely, so no claim is emitted for them")
+    void upsertOmitsAbsentOptionalAttributes() throws Exception {
+        // Absent means no claim. Writing "" instead would fail the User Profile's min-length
+        // validator with a 400, which adminFailure has no branch for and reports as a bare 502.
+        stubUserLookup("[]");
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+        service.upsertUser(userWithEmail("a@b.example"));
 
-        JsonNode registries = capturedBody(HttpMethod.PUT, "/users/" + KC_ID)
-                .path("attributes").path("registries");
-        assertThat(registries).hasSize(2);
-        assertThat(registries.get(0).asText()).isEqualTo("old-1");
-        assertThat(registries.get(1).asText()).isEqualTo("old-2");
+        JsonNode attributes = capturedBody(HttpMethod.POST, "/users").path("attributes");
+        assertThat(attributes.has("org_name")).isFalse();
+        assertThat(attributes.has("display_name")).isFalse();
+        assertThat(attributes.path("functional_role").get(0).asText()).isEqualTo(FUNCTIONAL_ROLE);
     }
 
     @Test
-    @DisplayName("an update with a new list replaces the old one")
-    void updateWithNewRegistriesReplaces() throws Exception {
-        stubUserLookup(existingUserWithRegistries("old-1", "old-2"));
+    @DisplayName("an update that omits orgName and displayName carries the stored values forward")
+    void updateOmittingOptionalAttributesCarriesThemForward() throws Exception {
+        // A Keycloak PUT that omits a key DELETES it, so "not mentioned" must mean "keep" — without
+        // this merge every identifiers-only republish would silently wipe both.
+        stubUserLookup(existingUserWithAttributes("Bharat Agri", "FIELD_OFFICER"));
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null,
-                java.util.List.of("new-1"));
-
-        JsonNode registries = capturedBody(HttpMethod.PUT, "/users/" + KC_ID)
-                .path("attributes").path("registries");
-        assertThat(registries).hasSize(1);
-        assertThat(registries.get(0).asText()).isEqualTo("new-1");
-    }
-
-    @Test
-    @DisplayName("an empty list clears registries by omitting the key, which is how Keycloak deletes")
-    void updateWithEmptyRegistriesClearsThem() throws Exception {
-        stubUserLookup(existingUserWithRegistries("old-1"));
-
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, java.util.List.of());
+        service.upsertUser(basicUser());
 
         JsonNode attributes = capturedBody(HttpMethod.PUT, "/users/" + KC_ID).path("attributes");
-        assertThat(attributes.has("registries")).isFalse();
-        // The other three must survive the clear.
+        assertThat(attributes.path("org_name").get(0).asText()).isEqualTo("Bharat Agri");
+        assertThat(attributes.path("display_name").get(0).asText()).isEqualTo("FIELD_OFFICER");
+    }
+
+    @Test
+    @DisplayName("an update with new values replaces the stored ones")
+    void updateWithNewOptionalAttributesReplaces() throws Exception {
+        stubUserLookup(existingUserWithAttributes("Bharat Agri", "FIELD_OFFICER"));
+
+        service.upsertUser(userWith(null, null, null, "Nova Agri", "DISTRICT_ADMIN"));
+
+        JsonNode attributes = capturedBody(HttpMethod.PUT, "/users/" + KC_ID).path("attributes");
+        assertThat(attributes.path("org_name").get(0).asText()).isEqualTo("Nova Agri");
+        assertThat(attributes.path("display_name").get(0).asText()).isEqualTo("DISTRICT_ADMIN");
+        // The required three must survive the update.
         assertThat(attributes.path("user_id").get(0).asText()).isEqualTo(USER_ID);
         assertThat(attributes.path("org_id").get(0).asText()).isEqualTo(ORG_ID);
+        assertThat(attributes.path("functional_role").get(0).asText()).isEqualTo(FUNCTIONAL_ROLE);
+    }
+
+    @Test
+    @DisplayName("a stored entity_type is not carried forward — the rename is not a merge")
+    void updateDropsTheRetiredAttributes() throws Exception {
+        // A user provisioned before the rename still holds entity_type and registries. Nothing reads
+        // either any more, and re-emitting them would keep the stale claims alive if a mapper for
+        // them were ever restored.
+        stubUserLookup("[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":true,"
+                + "\"attributes\":{\"entity_type\":[\"CHECKER\"],\"registries\":[\"reg-a\"]}}]");
+
+        service.upsertUser(basicUser());
+
+        JsonNode attributes = capturedBody(HttpMethod.PUT, "/users/" + KC_ID).path("attributes");
+        assertThat(attributes.has("entity_type")).isFalse();
+        assertThat(attributes.has("registries")).isFalse();
+        assertThat(attributes.path("functional_role").get(0).asText()).isEqualTo(FUNCTIONAL_ROLE);
     }
 
     @Test
@@ -501,7 +542,7 @@ class KeycloakServiceImplAdminTest {
         stubUserLookup("[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":true,"
                 + "\"firstName\":\"Asha\",\"lastName\":\"Rao\",\"email\":\"a@b.example\"}]");
 
-        service.upsertUser(USER_ID, ORG_ID, ENTITY_TYPE, null, null, null, null);
+        service.upsertUser(basicUser());
 
         JsonNode body = capturedBody(HttpMethod.PUT, "/users/" + KC_ID);
         assertThat(body.path("firstName").asText()).isEqualTo("Asha");

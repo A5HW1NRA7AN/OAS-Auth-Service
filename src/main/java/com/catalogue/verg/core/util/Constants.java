@@ -13,18 +13,21 @@ public final class Constants {
 
     public static final String SUCCESS = "success";
 
-    // Request fields. Only auth_token_create takes a credential, and only when
+    // Request fields, camelCase to match the user catalogue's payload; the claims they become are
+    // snake_case. Only auth_token_create takes a credential, and only when
     // catalogue.validate-enabled is true. The login identifier is the email.
     public static final String AUTH_FIELD_PASSWORD = "password";
     public static final String AUTH_FIELD_TOKEN = "token";
     public static final String AUTH_FIELD_REFRESH_TOKEN = "refreshToken";
     public static final String AUTH_FIELD_USER_ID = "userId";
     public static final String AUTH_FIELD_ORG_ID = "orgId";
-    public static final String AUTH_FIELD_ENTITY_TYPE = "entityType";
+    /** Renamed from entityType when the catalogue collapsed its per-catalogue registry[] to one role. */
+    public static final String AUTH_FIELD_FUNCTIONAL_ROLE = "functionalRole";
     public static final String AUTH_FIELD_EMAIL = "email";
     public static final String AUTH_FIELD_FIRST_NAME = "firstName";
     public static final String AUTH_FIELD_LAST_NAME = "lastName";
-    public static final String AUTH_FIELD_REGISTRIES = "registries";
+    public static final String AUTH_FIELD_ORG_NAME = "orgName";
+    public static final String AUTH_FIELD_DISPLAY_NAME = "displayName";
 
     public static final String AUTH_INVALID_REQUEST = "AUTH_INVALID_REQUEST";
     public static final String AUTH_INVALID_REQUEST_MSG = "Request is missing a required field";

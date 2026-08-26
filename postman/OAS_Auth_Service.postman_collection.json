@@ -21,7 +21,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"firstName\": \"Asha\",\n  \"lastName\": \"Menon\",\n  \"email\": \"asha.menon@example.com\",\n  \"password\": \"ChangeMe#2026\",\n  \"pin\": \"4321\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"dateOfBirth\": \"1994-04-12\",\n  \"gender\": \"FEMALE\",\n  \"phoneNumber\": \"9100000001\",\n  \"departmentName\": \"Agronomy\",\n  \"createdBy\": \"\"\n}"
+          "raw": "{\n  \"firstName\": \"Asha\",\n  \"lastName\": \"Menon\",\n  \"email\": \"asha.menon@example.com\",\n  \"password\": \"ChangeMe#2026\",\n  \"pin\": \"4321\",\n  \"orgId\": \"org-000000000001\",\n  \"orgName\": \"Bharat Agri\",\n  \"functionalRole\": \"MAKER\",\n  \"displayName\": \"FIELD_OFFICER\",\n  \"dateOfBirth\": \"1994-04-12\",\n  \"gender\": \"FEMALE\",\n  \"phoneNumber\": \"9100000001\",\n  \"location0Id\": \"loc-000000000001\",\n  \"location0Name\": \"Karnataka\",\n  \"createdBy\": \"\"\n}"
         },
         "url": {
           "raw": "{{catalogue_url}}/user/v1/add",
@@ -238,7 +238,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"userId\": \"PASTE_USER_ID\",\n  \"orgId\": \"org-000000000001\",\n  \"entityType\": \"MAKER\",\n  \"email\": \"asha.menon@example.com\",\n  \"firstName\": \"Asha\",\n  \"lastName\": \"Menon\"\n}"
+          "raw": "{\n  \"userId\": \"PASTE_USER_ID\",\n  \"orgId\": \"org-000000000001\",\n  \"functionalRole\": \"MAKER\",\n  \"email\": \"asha.menon@example.com\",\n  \"firstName\": \"Asha\",\n  \"lastName\": \"Menon\",\n  \"orgName\": \"Bharat Agri\",\n  \"displayName\": \"FIELD_OFFICER\"\n}"
         },
         "url": {
           "raw": "{{auth_url}}/auth/v1/auth_user_create",
