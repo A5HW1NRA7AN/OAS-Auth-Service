@@ -118,10 +118,18 @@ class KeycloakServiceImplTest {
                 .withClaim("azp", CLIENT_ID)
                 .withClaim("sid", "session-123")
                 .withClaim("preferred_username", "user-000000000001")
-                // Real tokens carry these three from the oas-profile client scope.
+                // Real tokens carry the client in aud, from the audience mapper setup-realm.sh adds.
+                // Without it Keycloak refuses to introspect, and the Redis-outage fallback in
+                // isActiveAccordingToKeycloak would reject every valid token.
+                .withAudience(CLIENT_ID)
+                // Real tokens carry these from the oas-profile client scope.
                 .withClaim("user_id", "user-000000000001")
                 .withClaim("org_id", "org-000000000001")
-                .withClaim("entity_type", "MAKER")
+                .withClaim("functional_role", "MAKER")
+                .withClaim("org_name", "Bharat Agri")
+                .withClaim("display_name", "FIELD_OFFICER")
+                .withClaim("first_name", "Asha")
+                .withClaim("last_name", "Rao")
                 .withIssuedAt(new Date(System.currentTimeMillis() - 1000))
                 .withExpiresAt(new Date(System.currentTimeMillis() + 300_000));
     }
@@ -417,9 +425,12 @@ class KeycloakServiceImplTest {
 
         service.recordSession(jwt);
 
+        // The key is pinned, not just the value: recordSession builds this JSON by hand, so a claim
+        // rename that misses it would leave the session index on the old key with nothing failing —
+        // nothing in this service ever reads these records back.
         org.mockito.Mockito.verify(valueOperations).set(
                 org.mockito.ArgumentMatchers.eq("auth:session:session-123"),
-                org.mockito.ArgumentMatchers.contains("user-000000000001"),
+                org.mockito.ArgumentMatchers.contains("\"functional_role\":\"MAKER\""),
                 org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.any());
         org.mockito.Mockito.verify(setOperations)

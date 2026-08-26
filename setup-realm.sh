@@ -112,36 +112,49 @@ fi
 # ---------------------------------------------------------------------------------
 step "1. Declaring custom attributes in the User Profile"
 # ---------------------------------------------------------------------------------
-# Fetch the current profile and add our three attributes if absent, preserving whatever
+# Fetch the current profile and add our five attributes if absent, preserving whatever
 # is already declared (username/email/firstName/lastName come as standard).
+#
+# first_name/last_name are deliberately NOT declared here: firstName and lastName are built-in
+# top-level Keycloak fields, so only the mapper's claim.name changes for those two.
 PROFILE=$(api "$KC/admin/realms/$REALM/users/profile")
 
 # Admin-edit-only: a user must never change their own org_id. (`label` is reserved in jq.)
 # email/firstName/lastName lose `required`: Keycloak requires them by default, and an incomplete
-# profile raises VERIFY_PROFILE, failing the grant with "Account is not fully set up".
+# profile raises VERIFY_PROFILE, failing the grant with "Account is not fully set up". That holds
+# even though auth_user_create requires an email — that is OUR contract, not Keycloak's.
 NEW_PROFILE=$(echo "$PROFILE" | jq '
-  def attr(n; display; multi):
+  def attr(n; display; maxlen):
     {
       name: n,
       displayName: display,
-      multivalued: multi,
+      multivalued: false,
       permissions: { view: ["admin","user"], edit: ["admin"] },
-      validations: { length: { min: 1, max: 64 } },
+      validations: { length: { min: 1, max: maxlen } },
       annotations: {}
     };
   .unmanagedAttributePolicy = "ADMIN_EDIT"
+  # Migration, not tidiness: entityType was renamed to functionalRole upstream and registry[] was
+  # deleted outright. Stripped BEFORE the append so a realm provisioned by an earlier version
+  # converges on the new set rather than carrying both.
+  | .attributes = [ .attributes[]
+      | select(.name != "entity_type" and .name != "registries") ]
   | .attributes = (
       .attributes
-      + (if any(.attributes[]; .name == "user_id")     then [] else [attr("user_id";     "OAS user id"; false)]     end)
-      + (if any(.attributes[]; .name == "org_id")      then [] else [attr("org_id";      "OAS organisation id"; false)] end)
-      + (if any(.attributes[]; .name == "entity_type") then [] else [attr("entity_type"; "OAS entity type"; false)] end)
-      + (if any(.attributes[]; .name == "registries")  then [] else [attr("registries";  "OAS registries"; true)]  end)
+      + (if any(.attributes[]; .name == "user_id")         then [] else [attr("user_id";         "OAS user id";            64)] end)
+      + (if any(.attributes[]; .name == "org_id")          then [] else [attr("org_id";          "OAS organisation id";    64)] end)
+      + (if any(.attributes[]; .name == "functional_role") then [] else [attr("functional_role"; "OAS functional role";    64)] end)
+      + (if any(.attributes[]; .name == "org_name")        then [] else [attr("org_name";        "OAS organisation name"; 255)] end)
+      + (if any(.attributes[]; .name == "display_name")    then [] else [attr("display_name";    "OAS display name";      255)] end)
     )
-  # Self-healing: the append checks NAMES only, and multivalued:false installs an implicit max:1
-  # validator that 400s a two-registry write. BOOLEAN here, STRING "true" in the mapper.
-  # The multivalued VALIDATOR is deliberately not declared: it would make `max` mandatory.
+  # Self-healing: the append checks NAMES only, so an attribute an earlier version declared
+  # multivalued would keep list semantics forever. All five are single-valued now.
+  # 255 rather than 64 on the two names: a real organisation name exceeds 64 routinely, and
+  # Keycloak answers 400, which adminFailure has no branch for and reports as a bare 502.
   | .attributes = [ .attributes[]
-      | if .name == "registries" then .multivalued = true else . end ]
+      | if (.name == "user_id" or .name == "org_id" or .name == "functional_role"
+            or .name == "org_name" or .name == "display_name")
+        then .multivalued = false else . end ]
   | .attributes = [ .attributes[]
       | if (.name == "email" or .name == "firstName" or .name == "lastName")
         then del(.required) else . end ]
@@ -149,17 +162,24 @@ NEW_PROFILE=$(echo "$PROFILE" | jq '
 
 api -X PUT "$KC/admin/realms/$REALM/users/profile" "${J[@]}" -d "$NEW_PROFILE" >/dev/null
 PROFILE_AFTER=$(api "$KC/admin/realms/$REALM/users/profile")
-DECLARED=$(echo "$PROFILE_AFTER" | jq -r '[.attributes[].name] | join(", ")')
-ok "declared: $DECLARED"
+ok "declared: $(echo "$PROFILE_AFTER" | jq -r '[.attributes[].name] | join(", ")')"
 
-for a in user_id org_id entity_type registries; do
-  echo "$DECLARED" | grep -q "$a" || die "attribute $a was not declared — tokens will have no $a claim"
+# Matched on the whole name, not by grep: a substring check is satisfied by an attribute merely
+# CONTAINING the name, which is exactly how a half-finished rename hides.
+for a in user_id org_id functional_role org_name display_name; do
+  echo "$PROFILE_AFTER" | jq -e --arg n "$a" 'any(.attributes[]; .name == $n)' >/dev/null \
+    || die "attribute $a was not declared — tokens will have no $a claim"
 done
 
-# The name check cannot catch a WRONGLY-declared attribute, and single-valued is the one that hurts.
-[ "$(echo "$PROFILE_AFTER" | jq -r '.attributes[] | select(.name=="registries") | .multivalued')" = "true" ] \
-  || die "registries is declared single-valued — a second registry would be rejected with 400"
-ok "registries is multi-valued"
+# The rename is only finished when the old names are GONE: a lingering declaration keeps the stale
+# value editable in the console and re-invites a mapper pointing at it. Written as `if`, never
+# `jq -e ... && die` — under `set -e` a failing check on the left of && kills the happy path.
+for a in entity_type registries; do
+  if echo "$PROFILE_AFTER" | jq -e --arg n "$a" 'any(.attributes[]; .name == $n)' >/dev/null; then
+    die "retired attribute $a is still declared — the User Profile PUT did not take"
+  fi
+done
+ok "entity_type and registries are no longer declared"
 
 # ---------------------------------------------------------------------------------
 step "2. Client scope 'oas-profile' with attribute mappers"
@@ -167,34 +187,86 @@ step "2. Client scope 'oas-profile' with attribute mappers"
 SCOPE_ID=$(api "$KC/admin/realms/$REALM/client-scopes" | jq -r '.[] | select(.name=="oas-profile") | .id')
 
 if [ -z "$SCOPE_ID" ]; then
-  # One oidc-usermodel-attribute-mapper per attribute, copying it into the access token,
-  # the ID token and userinfo.
-  mapper() {
-    jq -n --arg n "$1" '{
-      name: $n, protocol: "openid-connect",
-      protocolMapper: "oidc-usermodel-attribute-mapper",
-      consentRequired: false,
-      config: {
-        "user.attribute": $n, "claim.name": $n, "jsonType.label": "String",
-        "access.token.claim": "true", "id.token.claim": "true",
-        "userinfo.token.claim": "true", "introspection.token.claim": "true",
-        "multivalued": "false", "aggregate.attrs": "false"
-      }
-    }'
-  }
-  BODY=$(jq -n --argjson m "[$(mapper user_id),$(mapper org_id),$(mapper entity_type)]" '{
+  # Created EMPTY, on purpose. Every mapper is installed by the upsert loop below instead: this
+  # branch only runs on a fresh realm, so a mapper declared here would never reach an existing one
+  # — which is precisely how a renamed claim goes missing in production.
+  api -X POST "$KC/admin/realms/$REALM/client-scopes" "${J[@]}" -d "$(jq -n '{
     name: "oas-profile",
-    description: "OAS identifiers (user_id, org_id, entity_type) projected from the catalogue",
+    description: "OAS claims (user_id, org_id, functional_role, org_name, display_name, first_name, last_name)",
     protocol: "openid-connect",
     attributes: { "include.in.token.scope": "true", "display.on.consent.screen": "false" },
-    protocolMappers: $m
-  }')
-  api -X POST "$KC/admin/realms/$REALM/client-scopes" "${J[@]}" -d "$BODY" >/dev/null
+    protocolMappers: []
+  }')" >/dev/null
   SCOPE_ID=$(api "$KC/admin/realms/$REALM/client-scopes" | jq -r '.[] | select(.name=="oas-profile") | .id')
   ok "created oas-profile ($SCOPE_ID)"
 else
   skip "oas-profile already exists"
 fi
+
+[ -n "$SCOPE_ID" ] && [ "$SCOPE_ID" != "null" ] || die "oas-profile scope could not be resolved"
+MAPPERS_URL="$KC/admin/realms/$REALM/client-scopes/$SCOPE_ID/protocol-mappers/models"
+
+# One oidc-usermodel-attribute-mapper per claim, copied into the access token, the ID token and
+# userinfo. Takes the claim name AND the source attribute separately: first_name/last_name read
+# Keycloak's built-in firstName/lastName fields, the rest are our own attributes and read themselves.
+mapper() {
+  jq -n --arg n "$1" --arg a "$2" '{
+    name: $n, protocol: "openid-connect",
+    protocolMapper: "oidc-usermodel-attribute-mapper",
+    consentRequired: false,
+    config: {
+      "user.attribute": $a, "claim.name": $n, "jsonType.label": "String",
+      "access.token.claim": "true", "id.token.claim": "true",
+      "userinfo.token.claim": "true", "introspection.token.claim": "true",
+      "multivalued": "false", "aggregate.attrs": "false"
+    }
+  }'
+}
+
+# Create-or-repair, never skip on presence alone: a mapper still pointing at a renamed attribute
+# would otherwise survive every re-run and quietly emit the wrong claim.
+upsert_mapper() {
+  local name="$1" attribute="$2" desired existing
+  # Compared on the fields that decide the claim, not the whole config: Keycloak echoes back keys
+  # it added itself, so a verbatim diff would "repair" a correct mapper on every single run.
+  local fields='[.protocolMapper, .config["user.attribute"], .config["claim.name"],
+                 .config["multivalued"], .config["access.token.claim"],
+                 .config["introspection.token.claim"]] | @tsv'
+  desired=$(mapper "$name" "$attribute")
+  existing=$(api "$MAPPERS_URL" | jq -r --arg n "$name" '.[] | select(.name == $n) | .id // empty')
+  if [ -z "$existing" ]; then
+    api -X POST "$MAPPERS_URL" "${J[@]}" -d "$desired" >/dev/null
+    ok "added the $name mapper"
+  elif [ "$(api "$MAPPERS_URL/$existing" | jq -r "$fields")" = "$(echo "$desired" | jq -r "$fields")" ]; then
+    skip "$name mapper already correct"
+  else
+    # PUT wants the id in the body as well as the path.
+    api -X PUT "$MAPPERS_URL/$existing" "${J[@]}" \
+      -d "$(echo "$desired" | jq --arg id "$existing" '.id = $id')" >/dev/null
+    ok "repaired the $name mapper"
+  fi
+}
+
+upsert_mapper user_id         user_id
+upsert_mapper org_id          org_id
+upsert_mapper functional_role functional_role
+upsert_mapper org_name        org_name
+upsert_mapper display_name    display_name
+upsert_mapper first_name      firstName
+upsert_mapper last_name       lastName
+
+# Retired mappers, DELETED rather than left alone. entity_type still reads an attribute this
+# service no longer writes, so an already-provisioned user would keep emitting a stale role under
+# the old claim name — exactly the ambiguity the rename exists to end. registries is gone upstream.
+for m in entity_type registries; do
+  STALE_ID=$(api "$MAPPERS_URL" | jq -r --arg n "$m" '.[] | select(.name == $n) | .id // empty')
+  if [ -n "$STALE_ID" ]; then
+    api -X DELETE "$MAPPERS_URL/$STALE_ID" >/dev/null
+    ok "removed the retired $m mapper"
+  else
+    skip "no $m mapper present"
+  fi
+done
 
 # Audience mapper — required for token introspection to work at all.
 #
@@ -205,11 +277,10 @@ fi
 # Redis-outage fallback in KeycloakService would reject EVERY token — turning the outage it
 # exists to survive into a complete authentication outage.
 MAPPER_NAME="$CLIENT-audience"
-if api "$KC/admin/realms/$REALM/client-scopes/$SCOPE_ID/protocol-mappers/models" \
-   | jq -e --arg n "$MAPPER_NAME" '.[] | select(.name == $n)' >/dev/null; then
+if api "$MAPPERS_URL" | jq -e --arg n "$MAPPER_NAME" '.[] | select(.name == $n)' >/dev/null; then
   skip "audience mapper already present"
 else
-  api -X POST "$KC/admin/realms/$REALM/client-scopes/$SCOPE_ID/protocol-mappers/models" "${J[@]}" -d "$(
+  api -X POST "$MAPPERS_URL" "${J[@]}" -d "$(
     jq -n --arg n "$MAPPER_NAME" --arg c "$CLIENT" '{
       name: $n, protocol: "openid-connect", protocolMapper: "oidc-audience-mapper",
       consentRequired: false,
@@ -223,35 +294,49 @@ else
   ok "added audience mapper ($CLIENT in aud)"
 fi
 
-# Out here, not in the scope-creation body, which only runs when the scope is absent.
-# multivalued:"true" is the point: with "false" Keycloak emits only the FIRST value, WARN only.
-REG_MAPPER='{
-  "name": "registries",
-  "protocol": "openid-connect",
-  "protocolMapper": "oidc-usermodel-attribute-mapper",
-  "consentRequired": false,
-  "config": {
-    "user.attribute": "registries", "claim.name": "registries", "jsonType.label": "String",
-    "access.token.claim": "true", "id.token.claim": "true",
-    "userinfo.token.claim": "true", "introspection.token.claim": "true",
-    "multivalued": "true", "aggregate.attrs": "false"
-  }
-}'
-MAPPERS_URL="$KC/admin/realms/$REALM/client-scopes/$SCOPE_ID/protocol-mappers/models"
-REG_ID=$(api "$MAPPERS_URL" | jq -r '.[] | select(.name == "registries") | .id // empty')
+# ---------------------------------------------------------------------------------
+step "2b. Retiring given_name / family_name from the built-in 'profile' scope"
+# ---------------------------------------------------------------------------------
+# The token carries first_name / last_name instead, mapped from oas-profile above. Keycloak's own
+# `profile` scope would otherwise keep emitting the OIDC-standard pair alongside them, leaving two
+# names for one value and no signal about which a consumer should read.
+#
+# REALM-WIDE: `profile` is a built-in scope shared by every client in this realm, so this removes
+# given_name/family_name from all of them. Acceptable only because step 5 locks the realm down to
+# a single client.
+#
+# The `username` mapper in this scope is deliberately left ALONE: it produces preferred_username,
+# which resolveUserId falls back to for revocation and which auth_token_validate returns. The
+# `full name` mapper (`name`) is left alone too — nothing reads it and removing it buys nothing.
+PROFILE_SCOPE_ID=$(api "$KC/admin/realms/$REALM/client-scopes" \
+  | jq -r '.[] | select(.name=="profile") | .id // empty')
 
-if [ -z "$REG_ID" ]; then
-  api -X POST "$MAPPERS_URL" "${J[@]}" -d "$REG_MAPPER" >/dev/null
-  ok "added the registries mapper (multivalued)"
-elif [ "$(api "$MAPPERS_URL/$REG_ID" | jq -r '.config.multivalued // empty')" = "true" ]; then
-  skip "registries mapper already multivalued"
+if [ -z "$PROFILE_SCOPE_ID" ]; then
+  PROFILE_MAPPERS=""
+  skip "no built-in 'profile' scope in this realm"
 else
-  # Repaired in place: a presence-only check would skip a wrong mapper forever. PUT wants the id.
-  api -X PUT "$MAPPERS_URL/$REG_ID" "${J[@]}" \
-    -d "$(echo "$REG_MAPPER" | jq --arg id "$REG_ID" '.id = $id')" >/dev/null
-  ok "repaired the registries mapper -> multivalued"
+  PROFILE_MAPPERS="$KC/admin/realms/$REALM/client-scopes/$PROFILE_SCOPE_ID/protocol-mappers/models"
+  # Matched on what the mapper DOES, not on its display name: "given name" and "family name" are
+  # Keycloak's own strings and are not contractual across versions. oidc-full-name-mapper carries
+  # no user.attribute at all, so it can never match here.
+  for a in firstName lastName; do
+    FOUND=""
+    for ID in $(api "$PROFILE_MAPPERS" | jq -r --arg a "$a" \
+                  '.[] | select(.config["user.attribute"] == $a) | .id'); do
+      api -X DELETE "$PROFILE_MAPPERS/$ID" >/dev/null
+      FOUND=1
+    done
+    if [ -n "$FOUND" ]; then
+      ok "removed the built-in $a mapper"
+    else
+      skip "no built-in $a mapper present"
+    fi
+  done
 fi
 
+# ---------------------------------------------------------------------------------
+step "2c. Attaching oas-profile to $CLIENT"
+# ---------------------------------------------------------------------------------
 [ -n "$CLIENT_UUID" ] && [ "$CLIENT_UUID" != "null" ] || die "client $CLIENT not found"
 
 if api "$KC/admin/realms/$REALM/clients/$CLIENT_UUID/default-client-scopes" | jq -e '.[] | select(.name=="oas-profile")' >/dev/null; then
@@ -398,10 +483,43 @@ if executions | jq -e '.[] | select(.providerId != null and (.providerId | test(
 fi
 ok "no credential check in the bound flow"
 
-# Asserted end to end: a single-valued mapper fails silently, so nothing downstream would notice.
-api "$MAPPERS_URL" | jq -e '.[] | select(.name=="registries" and .config.multivalued=="true")' >/dev/null \
-  || die "registries mapper missing or single-valued — tokens would carry only the first registry"
-ok "registries claim is multi-valued end to end"
+# Asserted end to end, because a missing mapper fails SILENTLY: Keycloak omits the claim, answers
+# 200 on the token request and logs nothing, so nothing downstream would notice until a consumer
+# did. This is the only check standing between a half-applied rename and a role-less token.
+assert_mapper() {
+  api "$MAPPERS_URL" | jq -e --arg n "$1" --arg a "$2" \
+    '.[] | select(.name == $n
+                  and .protocolMapper == "oidc-usermodel-attribute-mapper"
+                  and .config["claim.name"] == $n
+                  and .config["user.attribute"] == $a
+                  and .config["access.token.claim"] == "true")' >/dev/null \
+    || die "$1 mapper missing or misconfigured — tokens would carry no $1 claim"
+}
+assert_mapper user_id         user_id
+assert_mapper org_id          org_id
+assert_mapper functional_role functional_role
+assert_mapper org_name        org_name
+assert_mapper display_name    display_name
+assert_mapper first_name      firstName
+assert_mapper last_name       lastName
+ok "all seven OAS claims are mapped into the access token"
+
+for m in entity_type registries; do
+  if api "$MAPPERS_URL" | jq -e --arg n "$m" '.[] | select(.name == $n)' >/dev/null; then
+    die "the retired $m mapper is still attached to oas-profile"
+  fi
+done
+ok "entity_type and registries are gone from oas-profile"
+
+if [ -n "$PROFILE_MAPPERS" ]; then
+  for a in firstName lastName; do
+    if api "$PROFILE_MAPPERS" | jq -e --arg a "$a" \
+         '.[] | select(.config["user.attribute"] == $a)' >/dev/null; then
+      die "the built-in $a mapper survives — tokens would still carry given_name/family_name"
+    fi
+  done
+  ok "given_name and family_name are retired"
+fi
 
 printf '\n%sRealm configured.%s\n' "$GRN" "$RST"
 executions | jq -r '.[] | "  \(.index)  \(.displayName)  [\(.requirement)]"'

@@ -8,7 +8,7 @@ Spring Boot 3.3.5, Java 17, no database of its own.
 ## Responsibilities
 
 The user-catalogue owns users and their passwords. Keycloak holds an identity shell per user — the
-catalogue's `userId` plus `org_id` and `entity_type` — and issues tokens for it, storing no credential
+catalogue's `userId` plus `org_id` and `functional_role` — and issues tokens for it, storing no credential
 of any kind. This service owns those tokens and their revocation, and administers the Keycloak users
 the catalogue publishes.
 
@@ -53,13 +53,14 @@ A user exists in Keycloak only because the catalogue published them.
 catalogue record -> ACTIVE
         |
         v
-POST /auth/v1/auth_user_create  { userId, orgId, entityType,
-                                  email?, firstName?, lastName?, registries? }
+POST /auth/v1/auth_user_create  { userId, orgId, functionalRole, email,
+                                  firstName?, lastName?, orgName?, displayName? }
         |
         v
 Keycloak user:  username = userId
                 enabled  = true
-                attributes = { user_id, org_id, entity_type, registries[] }
+                attributes = { user_id, org_id, functional_role, org_name, display_name }
+                firstName / lastName (top-level, projected as first_name / last_name)
                 credentials = (none)
 ```
 
@@ -152,7 +153,8 @@ curl -s localhost:8080/actuator/health/readiness
 
 curl -s -X POST localhost:8080/auth/v1/auth_user_create \
   -H 'Content-Type: application/json' \
-  -d '{"userId":"user-000000000001","orgId":"org-000000000001","entityType":"MAKER"}'
+  -d '{"userId":"user-000000000001","orgId":"org-000000000001","functionalRole":"MAKER",
+       "email":"user@example.com"}'
 
 curl -s -X POST localhost:8080/auth/v1/auth_token_create \
   -H 'Content-Type: application/json' -d '{"userId":"user-000000000001"}'
@@ -181,38 +183,36 @@ All six endpoints are `POST /auth/v1/<action>` with a JSON body, returning the s
 Creates or updates the Keycloak user. Idempotent, and also the re-enable path after a revoke.
 
 ```json
-{ "userId": "user-000000000001", "orgId": "org-000000000001", "entityType": "MAKER",
+{ "userId": "user-000000000001", "orgId": "org-000000000001", "functionalRole": "MAKER",
   "email": "user@example.com", "firstName": "Season", "lastName": "Field Agent",
-  "registries": ["cropCatalogue", "seasonCatalogue"] }
+  "orgName": "Bharat Agri", "displayName": "FIELD_OFFICER" }
 ```
 
 ```json
 { "result": { "userId": "user-000000000001", "created": true, "enabled": true } }
 ```
 
-`orgId` and `entityType` are required. `email`, `firstName`, `lastName` and `registries` are optional.
+`userId`, `orgId`, `functionalRole` and `email` are required. `firstName`, `lastName`, `orgName` and
+`displayName` are optional.
 
-`firstName` and `lastName` need no mapper: the client keeps Keycloak's built-in `profile` scope, so
-`given_name`, `family_name` and `name` appear in the token as soon as the fields are stored.
+`functionalRole` was called `entityType` until the catalogue collapsed its per-catalogue `registry[]`
+array to a single scalar role. The rename is hard: sending `entityType` is a `400`, not a fallback.
 
-`registries` is the user's list of accessible catalogues, and it is three-state:
+`email` is required because it is the login identifier the catalogue verifies a password against — a
+user published without one could never authenticate. Keycloak's own User Profile must NOT mark it
+required, though; that raises `VERIFY_PROFILE` and fails the grant with "Account is not fully set up",
+which is why `setup-realm.sh` deletes `required` from it.
 
-| Sent | Effect |
-|---|---|
-| omitted | whatever is stored is kept — an unrelated republish never wipes the list |
-| `[]` | cleared, and the claim disappears from the token entirely |
-| `["a","b"]` | replaced |
+**Every optional field carries forward.** Omitting one — or sending an explicit `null` — keeps whatever
+is stored, so a republish that knows only the identifiers never wipes a name. There is deliberately no
+"clear" signal: this endpoint is called from retry paths, and a stray `null` must not erase a value the
+caller did not mean to touch. The consequence is that an `orgName` or `displayName` set once cannot be
+unset through this API; `auth_user_delete` followed by `auth_user_create` is the escape hatch.
 
-Blank entries and duplicates are dropped; a non-array value is a `400`. Values come from whoever owns
-the permission matrix — this service only carries what it is given and has no opinion about who
-computes it. Once the catalogue manages registries it must send the key on every publish, and send `[]`
-to revoke: a caller that stops sending it keeps the previous list forever.
-
-`email`, `firstName` and `lastName` are likewise carried forward when omitted. An existing user returns
-`200` with `created: false` rather than a conflict — the caller is a catalogue whose publish is "push
-here, then persist ACTIVE", so every way this response can be lost leaves it believing the push did not
-happen. A 409 there would wedge the record permanently. The update rewrites `enabled` and all three
-attributes, so a republish repairs drift.
+An existing user returns `200` with `created: false` rather than a conflict — the caller is a catalogue
+whose publish is "push here, then persist ACTIVE", so every way this response can be lost leaves it
+believing the push did not happen. A 409 there would wedge the record permanently. The update rewrites
+`enabled` and every attribute, so a republish repairs drift.
 
 `409 AUTH_USER_CONFLICT` means a different Keycloak username already holds that email. Retrying will
 not fix it; the data has to change.
@@ -223,8 +223,8 @@ The body depends on `catalogue.validate-enabled`, and the flag alone selects the
 of the body.
 
 ```json
-{ "userId": "user-000000000001" }                      // flag off (default): trusts the caller
-{ "email": "asha@example.org", "password": "..." }     // flag on: verified by the catalogue
+{ "email": "asha@example.org", "password": "..." }     // flag on (default): verified by the catalogue
+{ "userId": "user-000000000001" }                      // flag off: trusts the caller
 ```
 
 Returns Keycloak's token response verbatim (`access_token`, `refresh_token`, `expires_in`, …).
@@ -243,17 +243,19 @@ downgrade out of verification. See [§4](#4-credential-verification-flag-gated).
 ```json
 { "result": { "active": true, "sub": "…", "preferred_username": "user-000000000001",
               "user_id": "user-000000000001", "org_id": "org-000000000001",
-              "entity_type": "MAKER", "registries": ["cropCatalogue", "seasonCatalogue"],
-              "given_name": "Season", "family_name": "Field Agent",
+              "org_name": "Bharat Agri", "functional_role": "MAKER",
+              "display_name": "FIELD_OFFICER",
+              "first_name": "Season", "last_name": "Field Agent",
               "email": "user@example.com", "exp": 1786968521, "jti": "…", "sid": "…" } }
 ```
 
 The token is never echoed back.
 
-`registries` is `null`, never `[]`, when the user holds none — Keycloak omits an empty attribute
-entirely, and `[]` would assert "this user holds no registries" on a token that never said so. If it
-ever comes back as a bare string, the realm's mapper is not multi-valued and Keycloak is sending only
-the first value; re-run `setup-realm.sh`, which asserts against exactly that.
+Every key is always present; an optional claim the token does not carry comes back as `null`. A key
+that is simply missing would be indistinguishable from one this service forgot to surface.
+
+If `functional_role`, `org_name` or `display_name` is `null` on a user you know has them, the realm's
+mappers are the first thing to check — see [§9](#9-things-that-will-bite-you).
 
 ### POST /auth/v1/auth_token_invalidate
 
@@ -315,24 +317,33 @@ caller retrying a half-finished cleanup has to be able to complete it.
   "preferred_username": "user-000000000001",
   "user_id": "user-000000000001",
   "org_id": "org-000000000001",
-  "entity_type": "MAKER",
-  "registries": ["cropCatalogue", "seasonCatalogue"],
-  "given_name": "Season",
-  "family_name": "Field Agent",
+  "org_name": "Bharat Agri",
+  "functional_role": "MAKER",
+  "display_name": "FIELD_OFFICER",
+  "first_name": "Season",
+  "last_name": "Field Agent",
   "name": "Season Field Agent",
   "email": "user@example.com",
   "email_verified": true
 }
 ```
 
-`user_id`, `org_id`, `entity_type` and `registries` are projected from the Keycloak user attributes that
-`auth_user_create` wrote. `given_name`, `family_name`, `name`, `email` and `email_verified` come from
-Keycloak's built-in `profile` and `email` scopes, with no mapper of ours involved.
+All seven of `user_id`, `org_id`, `functional_role`, `org_name`, `display_name`, `first_name` and
+`last_name` are projected by the `oas-profile` client scope's mappers. The first five read custom user
+attributes `auth_user_create` wrote; `first_name` and `last_name` read Keycloak's own `firstName` and
+`lastName` fields.
 
-`entity_type` and `registries` are both data, not permissions — there is no RBAC, and nothing here or in
-Keycloak enforces either. A consumer that wants to gate on `registries` must do so itself. Nothing caps
-the list length, and a few hundred entries would produce a JWT large enough to hit proxy header limits
-downstream.
+**`first_name` / `last_name`, not `given_name` / `family_name`.** Keycloak's built-in `profile` scope
+emits the OIDC-standard pair by default; `setup-realm.sh` deletes those two mappers so every claim in
+this token follows one naming convention. That costs interoperability with an off-the-shelf OIDC
+consumer, and it edits a scope shared by the whole realm — acceptable only because the realm is locked
+to a single client. `preferred_username` and `name` still come from that scope untouched, and
+`preferred_username` must stay: revocation falls back to it when `user_id` is absent.
+
+`functional_role` and `display_name` are data, not permissions — there is no RBAC, and nothing here or
+in Keycloak enforces either. `display_name` is the human-readable label for the role (e.g.
+`FIELD_OFFICER`); `functional_role` is the value to branch on. A consumer that wants to gate on either
+must do so itself.
 
 ### Errors
 
@@ -450,10 +461,11 @@ Nothing in the catalogue talks to Keycloak, and Keycloak does not call the catal
 | record deleted | `auth_user_delete` | |
 | login | `auth_token_create` with `{email, password}` | unless `catalogue.validate-enabled` is turned off |
 
-If the catalogue takes ownership of `registries`, it must send the key on every `auth_user_create`, and
-send `[]` to revoke access. Omitting it means "keep what is stored", which is right for a caller that
-does not manage the list but wrong for one that does — a revocation made in the catalogue's own database
-would otherwise leave the old claim in every token issued afterwards.
+Every optional field on `auth_user_create` carries forward when omitted, so a republish that knows only
+the identifiers never wipes a stored name. The flip side is that a value the catalogue *changes* only
+reaches the token on a republish: this service holds a snapshot taken at publish time, and nothing
+refreshes it. A catalogue that edits a user's `orgName`, `displayName` or `functionalRole` must call
+`auth_user_create` again, or every token issued afterwards carries the old value.
 
 Use a `RestTemplate` with timeouts. A shared bean usually has none, and a hung call would hold the
 request thread indefinitely. Do not report the raw exception on failure: a connection error message
@@ -693,7 +705,7 @@ same public issuer, and point `KEYCLOAK_ISSUER` at that value.
 
 **Undeclared user attributes are silently dropped.** On Keycloak 24+ writing an attribute the realm's
 User Profile does not declare returns `201 Created` with the attribute simply absent — no error, no log
-line. If tokens arrive without `user_id`, `org_id` or `entity_type`, this is the first thing to check.
+line. If tokens arrive without `user_id`, `org_id` or `functional_role`, this is the first thing to check.
 `setup-realm.sh` declares all of them and asserts them.
 
 **A required profile attribute breaks token issuance.** Keycloak declares `email`, `firstName` and
@@ -716,20 +728,29 @@ reject everything, turning a Redis outage into a total auth outage. `setup-realm
 both come back as `400 invalid_grant`. This service collapses all 4xx before mapping them, so its own
 responses are unaffected — but anything asserting on Keycloak's raw status will be wrong.
 
-**A single-valued mapper silently truncates `registries`.** If the protocol mapper's `multivalued` is
-`"false"` while the attribute holds several values, Keycloak 26.7 puts only the first in the token and
-logs nothing but a `KC-SERVICES0046` warning. A wrong access list, invisible to every caller. Two related
-traps: `multivalued: false` in the User Profile installs an implicit `max: 1` validator that rejects a
-two-value write with a 400, and declaring the `multivalued` validator explicitly makes `max` mandatory
-or the profile `PUT` itself is rejected. `setup-realm.sh` sets all of this and asserts both halves.
+**A client scope's mappers are only created when the scope is.** The original `setup-realm.sh` built
+`oas-profile`'s mappers inside `if [ -z "$SCOPE_ID" ]`, so re-running it against a realm that already
+had the scope printed `skip` and touched nothing. Adding a claim that way appears to work — the script
+exits `0` — while no mapper is ever created and every token silently omits it. `auth_token_create` still
+returns `200` and Keycloak logs nothing. Every mapper is now created through an upsert that runs
+unconditionally and is asserted in step 6; anything added later must go through the same loop.
 
-**An admin `PUT` that includes `attributes` but omits a key deletes that attribute.** This is why
-omitting `registries` from `auth_user_create` means "keep" rather than "clear" — the payload always emits
-an `attributes` object, so a request that simply did not mention the list would wipe it. Clearing is
-`[]`, which omits the key and is exactly how Keycloak represents "none".
+**An admin `PUT` that includes `attributes` but omits a key deletes that attribute.** The payload always
+emits an `attributes` object, so a request that simply did not mention `org_name` would wipe it. That is
+why `updateUser` merges the stored values in before building the payload, and why every optional field
+carries forward rather than clearing. Note the asymmetry it has to respect: `email`, `firstName` and
+`lastName` are top-level Keycloak fields, while `org_name` and `display_name` are attributes — reading
+either through the other's accessor compiles fine and silently wipes the value on every republish.
 
-**An empty attribute means the claim is absent, never `[]`.** A consumer must treat "no `registries` key"
-and "empty access list" as the same thing.
+**An empty attribute means the claim is absent, never empty.** Keycloak omits an attribute with no
+value entirely, so a consumer must treat "no `display_name` key" and "no display name" as the same
+thing. `auth_token_validate` normalises this: every key is always present, `null` when the token does
+not carry it.
+
+**A `length` validator that is too short reads as an outage.** The User Profile declares `max: 255` on
+`org_name` and `display_name`, not the 64 the identifiers use, because a real organisation name exceeds
+64 routinely. Over the limit Keycloak answers `400`, `adminFailure` has no branch for it, and the caller
+sees a bare `502 AUTH_IDP_OPERATION_FAILED` with the real reason only in Keycloak's own log.
 
 **`auth_token_create` takes the email; every other endpoint takes the userId.** That asymmetry is the
 easiest thing here to get wrong, because the catalogue has no username column and matches on `email`,
@@ -746,8 +767,6 @@ it recreates the client. Re-source `.env` and restart afterwards.
 
 ## 13. Not implemented
 
-- **The permission matrix.** Who computes a user's `registries` is not decided here. Today it is static
-  data in the UI; this service carries whatever list it is handed.
 - **Nothing enforces these tokens.** Catalogue endpoints are still open. This service gives you a way to
   get and check a token, not a requirement to have one. An interceptor calling `auth_token_validate` on
   protected paths is the piece that would let catalogue audit rows carry a real actor instead of
@@ -757,7 +776,7 @@ it recreates the client. Re-source `.env` and restart afterwards.
   blocking a user leaves their existing tokens valid until they expire. Both endpoints here are built
   and tested; only the calls are missing.
 - **No caller authentication on these endpoints.** Network isolation only — see [§6](#6-security-posture).
-- **No RBAC.** `entity_type` is a claim, not a permission.
+- **No RBAC.** `functional_role` is a claim, not a permission.
 - **No MFA**, and it cannot be added while Keycloak holds no credentials.
 - **No refresh endpoint.** Callers use Keycloak's token endpoint directly, or re-authenticate.
 - **No k8s manifests.** The Dockerfile plus environment-driven configuration is the deliverable.

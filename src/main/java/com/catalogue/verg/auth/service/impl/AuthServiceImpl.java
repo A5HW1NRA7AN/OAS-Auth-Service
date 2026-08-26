@@ -17,9 +17,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 @Service
@@ -28,7 +26,15 @@ public class AuthServiceImpl implements AuthService {
 
     private static final String CLAIM_USER_ID = "user_id";
     private static final String CLAIM_USERNAME = "preferred_username";
-    private static final String CLAIM_ENTITY_TYPE = "entity_type";
+    private static final String CLAIM_ORG_ID = "org_id";
+    private static final String CLAIM_FUNCTIONAL_ROLE = "functional_role";
+    private static final String CLAIM_ORG_NAME = "org_name";
+    private static final String CLAIM_DISPLAY_NAME = "display_name";
+    // Ours, not Keycloak's given_name/family_name: setup-realm.sh deletes the built-in profile
+    // scope's two name mappers and oas-profile projects these instead.
+    private static final String CLAIM_FIRST_NAME = "first_name";
+    private static final String CLAIM_LAST_NAME = "last_name";
+    private static final String CLAIM_SID = "sid";
 
     @Autowired
     private KeycloakService keycloakService;
@@ -64,14 +70,14 @@ public class AuthServiceImpl implements AuthService {
         success(response);
         // The outcome names the path, so the audit shows whether the password was checked.
         audit("auth_token_create", userId, verified ? "SUCCESS" : "SUCCESS_UNVERIFIED",
-                entityTypeOf(tokens));
+                functionalRoleOf(tokens));
         return response;
     }
 
     /**
      * Publishes a catalogue user into Keycloak when the record becomes ACTIVE. Idempotent, and the
-     * re-enable path. Optional fields carry forward; registries is three-state (absent keeps,
-     * {@code []} clears, non-empty replaces).
+     * re-enable path. Optional fields carry forward, so a republish that knows only the identifiers
+     * never wipes a stored name — which also means a value set once cannot be unset here.
      */
     @Override
     public CustomResponse authUserCreate(JsonNode userDetails) {
@@ -79,14 +85,17 @@ public class AuthServiceImpl implements AuthService {
         String userId = requiredText(userDetails, Constants.AUTH_FIELD_USER_ID);
         // Required: without these, tokens carry a null org_id and tenant checks see "no org".
         String orgId = requiredText(userDetails, Constants.AUTH_FIELD_ORG_ID);
-        String entityType = requiredText(userDetails, Constants.AUTH_FIELD_ENTITY_TYPE);
-        String email = optionalText(userDetails, Constants.AUTH_FIELD_EMAIL);
+        String functionalRole = requiredText(userDetails, Constants.AUTH_FIELD_FUNCTIONAL_ROLE);
+        // Also required: the email is the login identifier the catalogue verifies a password
+        // against, so a user published without one could never authenticate.
+        String email = requiredText(userDetails, Constants.AUTH_FIELD_EMAIL);
         String firstName = optionalText(userDetails, Constants.AUTH_FIELD_FIRST_NAME);
         String lastName = optionalText(userDetails, Constants.AUTH_FIELD_LAST_NAME);
-        List<String> registries = optionalStrings(userDetails, Constants.AUTH_FIELD_REGISTRIES);
+        String orgName = optionalText(userDetails, Constants.AUTH_FIELD_ORG_NAME);
+        String displayName = optionalText(userDetails, Constants.AUTH_FIELD_DISPLAY_NAME);
 
-        boolean created = keycloakService.upsertUser(userId, orgId, entityType, email,
-                firstName, lastName, registries);
+        boolean created = keycloakService.upsertUser(new KeycloakService.CatalogueUser(
+                userId, orgId, functionalRole, email, firstName, lastName, orgName, displayName));
 
         CustomResponse response = new CustomResponse();
         Map<String, Object> result = new HashMap<>();
@@ -95,7 +104,7 @@ public class AuthServiceImpl implements AuthService {
         result.put("enabled", true);
         response.setResult(result);
         success(response);
-        audit("auth_user_create", userId, created ? "USER_CREATED" : "USER_UPDATED", entityType);
+        audit("auth_user_create", userId, created ? "USER_CREATED" : "USER_UPDATED", functionalRole);
         return response;
     }
 
@@ -134,18 +143,19 @@ public class AuthServiceImpl implements AuthService {
         Map<String, Object> result = new HashMap<>();
         result.put("active", true);
         result.put("sub", jwt.getSubject());
-        result.put("preferred_username", claim(jwt, CLAIM_USERNAME));
-        result.put("user_id", claim(jwt, CLAIM_USER_ID));
-        result.put("org_id", claim(jwt, "org_id"));
-        result.put("entity_type", claim(jwt, CLAIM_ENTITY_TYPE));
-        // From Keycloak's built-in profile/email scopes, not our mappers.
-        result.put("given_name", claim(jwt, "given_name"));
-        result.put("family_name", claim(jwt, "family_name"));
-        result.put("email", claim(jwt, Constants.AUTH_FIELD_EMAIL));
-        result.put("registries", claimList(jwt, Constants.AUTH_FIELD_REGISTRIES));
+        result.put(CLAIM_USERNAME, claim(jwt, CLAIM_USERNAME));
+        result.put(CLAIM_USER_ID, claim(jwt, CLAIM_USER_ID));
+        result.put(CLAIM_ORG_ID, claim(jwt, CLAIM_ORG_ID));
+        result.put(CLAIM_ORG_NAME, claim(jwt, CLAIM_ORG_NAME));
+        result.put(CLAIM_FUNCTIONAL_ROLE, claim(jwt, CLAIM_FUNCTIONAL_ROLE));
+        result.put(CLAIM_DISPLAY_NAME, claim(jwt, CLAIM_DISPLAY_NAME));
+        result.put(CLAIM_FIRST_NAME, claim(jwt, CLAIM_FIRST_NAME));
+        result.put(CLAIM_LAST_NAME, claim(jwt, CLAIM_LAST_NAME));
+        // From Keycloak's built-in email scope, not our mappers.
+        result.put(Constants.AUTH_FIELD_EMAIL, claim(jwt, Constants.AUTH_FIELD_EMAIL));
         result.put("exp", jwt.getExpiresAt() == null ? null : jwt.getExpiresAt().toInstant().getEpochSecond());
         result.put("jti", jwt.getId());
-        result.put("sid", claim(jwt, "sid"));
+        result.put(CLAIM_SID, claim(jwt, CLAIM_SID));
 
         CustomResponse response = new CustomResponse();
         response.setResult(result);
@@ -176,7 +186,7 @@ public class AuthServiceImpl implements AuthService {
         success(response);
         // Actor comes from the VERIFIED token, never the request body.
         String actor = StringUtils.defaultIfBlank(claim(jwt, CLAIM_USER_ID), claim(jwt, CLAIM_USERNAME));
-        audit("auth_token_invalidate", actor, "REVOKED", claim(jwt, CLAIM_ENTITY_TYPE));
+        audit("auth_token_invalidate", actor, "REVOKED", claim(jwt, CLAIM_FUNCTIONAL_ROLE));
         return response;
     }
 
@@ -218,33 +228,8 @@ public class AuthServiceImpl implements AuthService {
         return (node != null && node.hasNonNull(field)) ? node.get(field).asText() : null;
     }
 
-    /** Optional string array; null keeps, [] clears. Blanks/dupes dropped; a non-array is a 400. */
-    private List<String> optionalStrings(JsonNode node, String field) {
-        if (node == null || !node.hasNonNull(field)) {
-            return null;
-        }
-        JsonNode array = node.get(field);
-        if (!array.isArray()) {
-            throw new CustomException(Constants.AUTH_INVALID_REQUEST,
-                    Constants.AUTH_INVALID_REQUEST_MSG, HttpStatus.BAD_REQUEST);
-        }
-        List<String> values = new ArrayList<>();
-        for (JsonNode value : array) {
-            String text = value.asText().trim();
-            if (StringUtils.isNotBlank(text) && !values.contains(text)) {
-                values.add(text);
-            }
-        }
-        return values;
-    }
-
     private String claim(DecodedJWT jwt, String name) {
         return jwt.getClaim(name).asString();
-    }
-
-    /** Multi-valued claim. Null when absent — Keycloak omits an empty attribute, so never {@code []}. */
-    private List<String> claimList(DecodedJWT jwt, String name) {
-        return jwt.getClaim(name).asList(String.class);
     }
 
     /** Records the freshly issued session. Safe to decode unverified: Keycloak just minted it. */
@@ -259,12 +244,12 @@ public class AuthServiceImpl implements AuthService {
         }
     }
 
-    /** Reads entity_type from a freshly issued token, for the audit row only — never a decision. */
-    private String entityTypeOf(Map<String, Object> tokens) {
+    /** Reads functional_role from a freshly issued token, for the audit row only — never a decision. */
+    private String functionalRoleOf(Map<String, Object> tokens) {
         try {
             Object accessToken = tokens == null ? null : tokens.get("access_token");
             return accessToken == null ? null
-                    : JWT.decode(accessToken.toString()).getClaim(CLAIM_ENTITY_TYPE).asString();
+                    : JWT.decode(accessToken.toString()).getClaim(CLAIM_FUNCTIONAL_ROLE).asString();
         } catch (Exception e) {
             return null;
         }
@@ -273,10 +258,13 @@ public class AuthServiceImpl implements AuthService {
     /**
      * Audit trail, emitted to the application log the platform already collects; this service owns
      * no database. Logs only operation, actor and outcome — never a password, token or raw body.
+     *
+     * <p>The key is {@code functionalRole=}, renamed from {@code entityType=} with the claim. Any
+     * log query or alert matching the old key needs updating with this release.
      */
-    private void audit(String operation, String subject, String outcome, String entityType) {
-        log.info("AUDIT operation={} userId={} entityType={} outcome={}",
-                operation, subject, StringUtils.defaultString(entityType, "-"), outcome);
+    private void audit(String operation, String subject, String outcome, String functionalRole) {
+        log.info("AUDIT operation={} userId={} functionalRole={} outcome={}",
+                operation, subject, StringUtils.defaultString(functionalRole, "-"), outcome);
     }
 
     private void success(CustomResponse response) {

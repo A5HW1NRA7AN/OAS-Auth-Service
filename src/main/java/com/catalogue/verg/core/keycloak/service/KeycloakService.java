@@ -43,14 +43,32 @@ public interface KeycloakService {
     boolean logoutFromKeycloak(String refreshToken);
 
     /**
-     * Creates or updates the Keycloak user, with no credential. Also the re-enable path. Optional
-     * fields carry forward; {@code registries} is three-state (null keeps, empty clears, non-empty
-     * replaces), so a caller owning the list must always send it.
+     * The catalogue's view of a user, as pushed into Keycloak. A record rather than the eight
+     * positional arguments it replaces: with six of them consecutive Strings, transposing any two
+     * compiles cleanly and no test can see it.
+     *
+     * <p>Not a DTO in the sense AUTH_SERVICE.md rules out — it mirrors no wire format and no
+     * Keycloak response, and exists only to name these arguments.
+     *
+     * <p>{@code userId}, {@code orgId}, {@code functionalRole} and {@code email} are required; the
+     * rest are optional and CARRY FORWARD when null. {@code functionalRole} was {@code entityType}
+     * until the catalogue collapsed its per-catalogue {@code registry[]} to a single role.
+     */
+    record CatalogueUser(String userId, String orgId, String functionalRole, String email,
+                         String firstName, String lastName, String orgName, String displayName) {
+    }
+
+    /**
+     * Creates or updates the Keycloak user, with no credential. Also the re-enable path.
+     *
+     * <p>Every optional field carries forward: a null leaves whatever is stored alone, so a
+     * republish that knows only the identifiers never wipes a name. There is deliberately no
+     * "clear" signal — an attribute set once cannot be unset through this endpoint, because the
+     * caller retries this call and a stray null must not erase a value it did not mean to touch.
      *
      * @return true when a user was created, false when an existing one was updated
      */
-    boolean upsertUser(String userId, String orgId, String entityType, String email,
-                       String firstName, String lastName, java.util.List<String> registries);
+    boolean upsertUser(CatalogueUser user);
 
     /**
      * Disables the user and ends their Keycloak sessions.
