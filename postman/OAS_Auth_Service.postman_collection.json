@@ -21,7 +21,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"firstName\": \"Asha\",\n  \"lastName\": \"Menon\",\n  \"email\": \"asha.menon@example.com\",\n  \"password\": \"ChangeMe#2026\",\n  \"pin\": \"4321\",\n  \"orgId\": \"org-000000000001\",\n  \"orgName\": \"Bharat Agri\",\n  \"functionalRole\": \"MAKER\",\n  \"displayName\": \"FIELD_OFFICER\",\n  \"dateOfBirth\": \"1994-04-12\",\n  \"gender\": \"FEMALE\",\n  \"phoneNumber\": \"9100000001\",\n  \"location0Id\": \"loc-000000000001\",\n  \"location0Name\": \"Karnataka\",\n  \"createdBy\": \"\"\n}"
+          "raw": "{\n  \"firstName\": \"test\",\n  \"lastName\": \"user\",\n  \"email\": \"test.user@example.com\",\n  \"password\": \"test123\",\n  \"pin\": \"123456\",\n  \"orgId\": \"org-000000000001\",\n  \"orgName\": \"Ethiopian Institute of Agricultural Research\",\n  \"functionalRole\": \"MAKER\",\n  \"displayName\": \"FIELD_OFFICER\",\n  \"dateOfBirth\": \"1994-04-12\",\n  \"gender\": \"MALE\",\n  \"phoneNumber\": \"+251-911-000-001\",\n  \"location0Id\": \"loc-000000000001\",\n  \"location0Name\": \"Ethiopia\",\n  \"location1Id\": \"loc-000000000002\",\n  \"location1Name\": \"Oromia\",\n  \"location2Id\": \"loc-000000000003\",\n  \"location2Name\": \"East Shewa\",\n  \"location3Id\": \"loc-000000000004\",\n  \"location3Name\": \"Bishoftu\",\n  \"location4Id\": \"loc-000000000005\",\n  \"location4Name\": \"Kebele 05\",\n  \"createdBy\": \"\"\n}"
         },
         "url": {
           "raw": "{{catalogue_url}}/user/v1/add",
@@ -78,7 +78,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"email\": \"asha.menon@example.com\",\n  \"password\": \"ChangeMe#2026\"\n}"
+          "raw": "{\n  \"email\": \"test.user@example.com\",\n  \"password\": \"test123\"\n}"
         },
         "url": {
           "raw": "{{catalogue_url}}/user/v1/verify",
@@ -110,7 +110,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"email\": \"asha.menon@example.com\",\n  \"password\": \"ChangeMe#2026\"\n}"
+          "raw": "{\n  \"email\": \"test.user@example.com\",\n  \"password\": \"test123\"\n}"
         },
         "url": {
           "raw": "{{auth_url}}/auth/v1/auth_token_create",
@@ -238,7 +238,7 @@
         ],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"userId\": \"PASTE_USER_ID\",\n  \"orgId\": \"org-000000000001\",\n  \"functionalRole\": \"MAKER\",\n  \"email\": \"asha.menon@example.com\",\n  \"firstName\": \"Asha\",\n  \"lastName\": \"Menon\",\n  \"orgName\": \"Bharat Agri\",\n  \"displayName\": \"FIELD_OFFICER\"\n}"
+          "raw": "{\n  \"userId\": \"PASTE_USER_ID\",\n  \"orgId\": \"org-000000000001\",\n  \"functionalRole\": \"MAKER\",\n  \"email\": \"test.user@example.com\",\n  \"firstName\": \"test\",\n  \"lastName\": \"user\",\n  \"orgName\": \"Ethiopian Institute of Agricultural Research\",\n  \"displayName\": \"FIELD_OFFICER\"\n}"
         },
         "url": {
           "raw": "{{auth_url}}/auth/v1/auth_user_create",
