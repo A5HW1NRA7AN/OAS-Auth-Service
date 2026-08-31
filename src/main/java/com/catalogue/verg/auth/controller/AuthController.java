@@ -31,6 +31,13 @@ public class AuthController {
         return new ResponseEntity<>(response, response.getResponseCode());
     }
 
+    /** {refreshToken} -> a fresh token pair, so a short access-token lifespan is not a re-login. */
+    @PostMapping("/v1/auth_token_refresh")
+    public ResponseEntity<CustomResponse> authTokenRefresh(@RequestBody JsonNode tokenDetails) {
+        CustomResponse response = authService.authTokenRefresh(tokenDetails);
+        return new ResponseEntity<>(response, response.getResponseCode());
+    }
+
     /** Verifies a token locally and returns a summary of its claims. */
     @PostMapping("/v1/auth_token_validate")
     public ResponseEntity<CustomResponse> authTokenValidate(@RequestBody JsonNode tokenDetails) {

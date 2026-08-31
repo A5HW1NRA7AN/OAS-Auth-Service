@@ -105,6 +105,50 @@ class AuthServiceImplTest {
         verify(keycloakService, never()).requestToken(anyString());
     }
 
+    // ── auth_token_refresh ─────────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("refresh returns Keycloak's new token pair verbatim and re-indexes the session")
+    void tokenRefreshReturnsNewPairAndReIndexes() {
+        // A real signed token, so the best-effort decode inside indexSession actually succeeds.
+        String access = tokenWith("{\"sid\":\"session-1\",\"user_id\":\"" + USER_ID + "\"}").getToken();
+        when(keycloakService.refreshToken("rt-old")).thenReturn(
+                new java.util.HashMap<>(java.util.Map.of("access_token", access, "refresh_token", "rt-new")));
+
+        CustomResponse response = service.authTokenRefresh(json("{\"refreshToken\":\"rt-old\"}"));
+
+        verify(keycloakService).refreshToken("rt-old");
+        verify(keycloakService).recordSession(any());
+        assertThat(response.getResult())
+                .containsEntry("access_token", access)
+                .containsEntry("refresh_token", "rt-new");
+        assertThat(response.getResponseCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    @DisplayName("refresh without a refreshToken is a 400, and Keycloak is never called")
+    void tokenRefreshRequiresTheToken() {
+        assertThatThrownBy(() -> service.authTokenRefresh(json("{}")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_REQUEST)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.BAD_REQUEST);
+        verify(keycloakService, never()).refreshToken(anyString());
+    }
+
+    @Test
+    @DisplayName("a refusal from Keycloak propagates, and nothing is indexed")
+    void tokenRefreshPropagatesRefusal() {
+        // Keycloak collapses expired, malformed and session-ended refresh tokens into one 401.
+        when(keycloakService.refreshToken("rt-dead")).thenThrow(new CustomException(
+                Constants.AUTH_TOKEN_INVALID, Constants.AUTH_TOKEN_INVALID_MSG, HttpStatus.UNAUTHORIZED));
+
+        assertThatThrownBy(() -> service.authTokenRefresh(json("{\"refreshToken\":\"rt-dead\"}")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_TOKEN_INVALID)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.UNAUTHORIZED);
+        verify(keycloakService, never()).recordSession(any());
+    }
+
     // ── auth_user_create ───────────────────────────────────────────────────────────────────────
 
     @ParameterizedTest
