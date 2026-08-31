@@ -70,7 +70,30 @@ public class AuthServiceImpl implements AuthService {
         success(response);
         // The outcome names the path, so the audit shows whether the password was checked.
         audit("auth_token_create", userId, verified ? "SUCCESS" : "SUCCESS_UNVERIFIED",
-                functionalRoleOf(tokens));
+                claimOf(tokens, CLAIM_FUNCTIONAL_ROLE));
+        return response;
+    }
+
+    /**
+     * Exchanges a refresh token for a fresh token pair, so a short access-token lifespan does not
+     * force a re-login. Keycloak is the authority: the token is forwarded unexamined, because
+     * verifyToken deliberately rejects a refresh token (typ != Bearer) and only Keycloak knows
+     * whether the session behind it is still alive.
+     */
+    @Override
+    public CustomResponse authTokenRefresh(JsonNode tokenDetails) {
+        log.info("AuthServiceImpl::authTokenRefresh");
+        Map<String, Object> tokens = keycloakService.refreshToken(
+                requiredText(tokenDetails, Constants.AUTH_FIELD_REFRESH_TOKEN));
+        // A refresh keeps the sid and mints a new jti, so re-indexing extends the session record's
+        // TTL and keeps "revoke this user" able to enumerate it.
+        indexSession(tokens);
+
+        CustomResponse response = new CustomResponse();
+        response.setResult(tokens);
+        success(response);
+        audit("auth_token_refresh", claimOf(tokens, CLAIM_USER_ID), "SUCCESS",
+                claimOf(tokens, CLAIM_FUNCTIONAL_ROLE));
         return response;
     }
 
@@ -244,12 +267,12 @@ public class AuthServiceImpl implements AuthService {
         }
     }
 
-    /** Reads functional_role from a freshly issued token, for the audit row only — never a decision. */
-    private String functionalRoleOf(Map<String, Object> tokens) {
+    /** Reads a claim from a freshly issued token, for the audit row only — never a decision. */
+    private String claimOf(Map<String, Object> tokens, String claimName) {
         try {
             Object accessToken = tokens == null ? null : tokens.get("access_token");
             return accessToken == null ? null
-                    : JWT.decode(accessToken.toString()).getClaim(CLAIM_FUNCTIONAL_ROLE).asString();
+                    : JWT.decode(accessToken.toString()).getClaim(claimName).asString();
         } catch (Exception e) {
             return null;
         }

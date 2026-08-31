@@ -127,6 +127,38 @@
       }
     },
     {
+      "name": "Refresh Token",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"refreshToken\": \"PASTE_REFRESH_TOKEN\"\n}"
+        },
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_refresh",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_refresh"
+          ]
+        },
+        "description": "Exchanges the refresh token from Create Token for a fresh pair. The access token lives 5 minutes; the session behind it lasts hours, so this is how a client stays logged in without re-sending the password. Copy the new access_token onward; the old one keeps working until it expires."
+      }
+    },
+    {
       "name": "Validate Token",
       "request": {
         "method": "POST",

@@ -43,6 +43,15 @@ public interface KeycloakService {
     boolean logoutFromKeycloak(String refreshToken);
 
     /**
+     * Exchanges a refresh token for a fresh token pair, so a short access-token lifespan does not
+     * force a re-login.
+     *
+     * @throws com.catalogue.verg.core.exception.CustomException 401 when Keycloak refuses the refresh
+     *         (expired, malformed, already used, or the session has ended), 503 when it is unreachable
+     */
+    Map<String, Object> refreshToken(String refreshToken);
+
+    /**
      * The catalogue's view of a user, as pushed into Keycloak. A record rather than the eight
      * positional arguments it replaces: with six of them consecutive Strings, transposing any two
      * compiles cleanly and no test can see it.

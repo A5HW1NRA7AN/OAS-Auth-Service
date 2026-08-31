@@ -443,6 +443,58 @@ class KeycloakServiceImplAdminTest {
                 .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.BAD_GATEWAY);
     }
 
+    // ── refresh ────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("refresh sends the refresh_token grant, and no username or password")
+    void refreshTokenSendsTheRefreshGrant() {
+        when(restTemplate.exchange(contains("/protocol/openid-connect/token"),
+                eq(HttpMethod.POST), any(), eq(Map.class)))
+                .thenReturn(ResponseEntity.ok(Map.of("access_token", "at2", "refresh_token", "rt2")));
+
+        Map<String, Object> tokens = service.refreshToken("rt-old");
+
+        ArgumentCaptor<HttpEntity> captor = ArgumentCaptor.forClass(HttpEntity.class);
+        verify(restTemplate).exchange(contains("/protocol/openid-connect/token"),
+                eq(HttpMethod.POST), captor.capture(), eq(Map.class));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> form = (Map<String, Object>) captor.getValue().getBody();
+        assertThat(form).containsKeys("grant_type", "client_id", "refresh_token", "client_secret");
+        assertThat(form).doesNotContainKeys("username", "password");
+        assertThat(form.get("grant_type").toString()).contains("refresh_token");
+        assertThat(form.get("refresh_token").toString()).contains("rt-old");
+        assertThat(tokens).containsEntry("access_token", "at2").containsEntry("refresh_token", "rt2");
+    }
+
+    @Test
+    @DisplayName("Keycloak's 400 invalid_grant becomes a 401, not a 502 — a refresh carries no userId")
+    void refreshTokenRefusalIsAnInvalidToken() {
+        // Expired, malformed, already-used and session-ended all arrive as 400 invalid_grant, and
+        // explainRefusedGrant cannot help: its admin lookup is keyed on a userId this call lacks.
+        when(restTemplate.exchange(contains("/protocol/openid-connect/token"),
+                eq(HttpMethod.POST), any(), eq(Map.class)))
+                .thenThrow(HttpClientErrorException.create(HttpStatus.BAD_REQUEST, "invalid_grant",
+                        null, null, null));
+
+        assertThatThrownBy(() -> service.refreshToken("rt-dead"))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_TOKEN_INVALID)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    @DisplayName("an unreachable Keycloak is a 503, and the cause is never surfaced")
+    void refreshTokenUnreachableIsUnavailable() {
+        when(restTemplate.exchange(contains("/protocol/openid-connect/token"),
+                eq(HttpMethod.POST), any(), eq(Map.class)))
+                .thenThrow(new ResourceAccessException("connection refused"));
+
+        assertThatThrownBy(() -> service.refreshToken("rt-old"))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
     // ── the profile fields and the two optional attributes ─────────────────────────────────────
 
     @Test

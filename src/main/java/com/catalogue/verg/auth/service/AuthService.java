@@ -7,6 +7,8 @@ public interface AuthService {
 
     CustomResponse authTokenCreate(JsonNode tokenDetails);
 
+    CustomResponse authTokenRefresh(JsonNode tokenDetails);
+
     CustomResponse authTokenValidate(JsonNode tokenDetails);
 
     CustomResponse authTokenInvalidate(JsonNode tokenDetails);

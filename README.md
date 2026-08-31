@@ -175,7 +175,7 @@ repository can reach its data.
 
 ## 3. API reference
 
-All six endpoints are `POST /auth/v1/<action>` with a JSON body, returning the standard envelope
+All seven endpoints are `POST /auth/v1/<action>` with a JSON body, returning the standard envelope
 (`result`, `params`, `responseCode`) on success and `{code, message, httpStatusCode}` on failure.
 
 ### POST /auth/v1/auth_user_create
@@ -233,6 +233,32 @@ With the flag on, a `userId` in the body is ignored: the token is issued for the
 returned. Honouring the body's value would let one valid password mint a token for any other account.
 Sending only `{userId}` while the flag is on is a `400`, not a fallback — otherwise any caller could
 downgrade out of verification. See [§4](#4-credential-verification-flag-gated).
+
+### POST /auth/v1/auth_token_refresh
+
+```json
+{ "refreshToken": "<the refresh token from auth_token_create>" }
+```
+
+Returns Keycloak's token response verbatim, exactly as `auth_token_create` does — a new
+`access_token` and a new `refresh_token`.
+
+The access token lives 5 minutes; the session behind it lives 30 minutes idle and up to 10 hours
+(inherited Keycloak defaults — `setup-realm.sh` sets none of them). Without this endpoint a client
+had no way to spend the refresh token it was already given, because Keycloak's own token endpoint is
+deliberately not routed through Kong, so the only option was to re-send the password every five
+minutes.
+
+The token is forwarded to Keycloak unexamined. `auth_token_validate` deliberately rejects a refresh
+token (`typ` is not `Bearer`), and only Keycloak knows whether the session behind it is still alive.
+Every refusal it can give — expired, malformed, already used, session ended — arrives as
+`400 invalid_grant`, so they collapse into one `401 AUTH_TOKEN_INVALID`; the reason is logged, never
+returned.
+
+A refresh keeps the same `sid` and mints a new `jti`, so the session index is re-written and
+`auth_user_revoke` can still enumerate it. There is no denylist check here on purpose: the `sid` and
+user denylists are checked by `auth_token_validate`, which every consumer calls, so a refreshed token
+belonging to a revoked user is rejected at the point of use.
 
 ### POST /auth/v1/auth_token_validate
 
@@ -479,7 +505,7 @@ again immediately, but the per-session entries are left in place on purpose.
 ## 6. Security posture
 
 Nothing here authenticates its caller. There is no interceptor, no API key, no mTLS. Access control is
-entirely network-level, by decision. All six endpoints, and Keycloak's token endpoint, must be
+entirely network-level, by decision. All seven endpoints, and Keycloak's token endpoint, must be
 unreachable from outside the cluster.
 
 During the UAT integration window that property does not hold: the service is routed through Kong at
@@ -572,7 +598,7 @@ anywhere in the application.
 | Requirement | Status |
 |---|---|
 | `/actuator/health/liveness`, `/actuator/health/readiness` | yes |
-| `/v3/api-docs` | yes, all six endpoints |
+| `/v3/api-docs` | yes, all seven endpoints |
 | Port 8080 via `SERVER_PORT` | yes |
 | Env-driven config, no hardcoded hosts | yes |
 | `./mvnw clean package -DskipTests` | yes |
@@ -669,7 +695,7 @@ docker exec acs-auth-redis redis-cli DEL "auth:denylist:user:<userId>"
 
 ```
 src/main/java/com/catalogue/verg/
-  auth/controller/AuthController              the six endpoints
+  auth/controller/AuthController              the seven endpoints
   auth/service/AuthService                    interface
   auth/service/impl/AuthServiceImpl           orchestration and audit logging
   core/keycloak/config/KeycloakConfig         RestTemplate and JwkProvider beans
@@ -778,5 +804,4 @@ it recreates the client. Re-source `.env` and restart afterwards.
 - **No caller authentication on these endpoints.** Network isolation only — see [§6](#6-security-posture).
 - **No RBAC.** `functional_role` is a claim, not a permission.
 - **No MFA**, and it cannot be added while Keycloak holds no credentials.
-- **No refresh endpoint.** Callers use Keycloak's token endpoint directly, or re-authenticate.
 - **No k8s manifests.** The Dockerfile plus environment-driven configuration is the deliverable.

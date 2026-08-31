@@ -601,6 +601,32 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
+    @Override
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> refreshToken(String refreshToken) {
+        MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
+        form.add("grant_type", "refresh_token");
+        form.add("client_id", vergProperties.getKeycloakClientId());
+        form.add("refresh_token", refreshToken);
+        if (StringUtils.isNotBlank(vergProperties.getKeycloakClientSecret())) {
+            form.add("client_secret", vergProperties.getKeycloakClientSecret());
+        }
+        try {
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    tokenEndpoint(), HttpMethod.POST, formEntity(form), Map.class);
+            return response.getBody();
+        } catch (HttpClientErrorException e) {
+            // Keycloak answers 400 invalid_grant for expired, malformed, already-used and
+            // session-ended refresh tokens alike, so they collapse into one 401. Not
+            // explainRefusedGrant: that lookup is keyed on a userId, and a refresh carries none.
+            log.warn("KeycloakServiceImpl::refreshToken: refresh refused (status={})", e.getStatusCode());
+            throw invalidToken("refresh token refused by Keycloak");
+        } catch (RestClientException e) {
+            log.error("KeycloakServiceImpl::refreshToken: Keycloak unreachable", e);
+            throw unreachable();
+        }
+    }
+
     /**
      * True if this token, its session or its user is revoked. Falls back to Keycloak introspection
      * when Redis cannot answer, and fails closed when neither can.
