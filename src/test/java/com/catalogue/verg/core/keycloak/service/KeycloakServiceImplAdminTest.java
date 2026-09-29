@@ -38,11 +38,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/**
- * The Keycloak admin plane: creating, disabling and deleting users, and the service-account token
- * behind them. The token endpoint and admin API share one mocked RestTemplate, so stubs are
- * separated by URL and response type — Map for tokens, JsonNode for lookups, String for writes.
- */
+/** Keycloak admin plane; stubs split by URL and response type: Map token, JsonNode lookup, String write. */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class KeycloakServiceImplAdminTest {
@@ -145,17 +141,14 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("a token expiring inside the refresh skew is never cached")
     void shortLivedAdminTokenIsRefetched() {
-        // expires_in below the 30s skew floors the cached lifetime at zero, so every request has to
-        // go back to Keycloak. Asserted arithmetically rather than by sleeping.
+        // expires_in below the 30s skew floors the cache life at zero: asserted, not slept.
         stubAdminToken(5);
         stubUserLookup(existingUser(true));
 
         service.upsertUser(basicUser());
         service.upsertUser(basicUser());
 
-        // Four, not two: each upsert authorises two admin requests (the lookup and the write), and
-        // with nothing cacheable each one fetches its own token. Contrast
-        // adminTokenIsFetchedOnceAndReused, where the same four requests share a single token.
+        // Four: each upsert makes two admin requests and nothing is cacheable, so each fetches a token.
         verify(restTemplate, times(4))
                 .exchange(contains("/protocol/openid-connect/token"), eq(HttpMethod.POST), any(), eq(Map.class));
     }
@@ -307,8 +300,7 @@ class KeycloakServiceImplAdminTest {
         verify(restTemplate).exchange(contains("/users/" + KC_ID), eq(HttpMethod.PUT),
                 captor.capture(), eq(String.class));
         JsonNode body = MAPPER.readTree((String) captor.getValue().getBody());
-        // Keycloak only touches `attributes` when the key is present, so omitting it preserves
-        // user_id/org_id/functional_role without a read-modify-write.
+        // Omitting attributes preserves user_id/org_id/functional_role without a read-modify-write.
         assertThat(body.fieldNames()).toIterable().containsExactly("enabled");
         assertThat(body.path("enabled").asBoolean()).isFalse();
         verify(restTemplate).exchange(contains("/logout"), eq(HttpMethod.POST), any(), eq(String.class));
@@ -317,8 +309,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("disable is best-effort: a Keycloak failure returns false rather than throwing")
     void disableSwallowsFailures() {
-        // The Redis revocation is what actually stopped the blocked user, so a blip here must not
-        // fail the block.
+        // Redis already stopped the blocked user, so a blip here must not fail the block.
         stubUserLookup(existingUser(true));
         when(restTemplate.exchange(contains("/users/" + KC_ID), eq(HttpMethod.PUT), any(), eq(String.class)))
                 .thenThrow(new ResourceAccessException("connection refused"));
@@ -329,8 +320,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("disable on an unknown user is a loud 404, not a quiet false")
     void disableUnknownUserIsNotFound() {
-        // Nothing was revoked, so success would hide a caller passing the wrong identifier — most
-        // likely the email, since that is what auth_token_create takes.
+        // Success would hide a wrong identifier, most likely the email auth_token_create takes.
         stubUserLookup("[]");
 
         assertThatThrownBy(() -> service.disableUser(USER_ID))
@@ -354,8 +344,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("delete on an already-absent user succeeds without issuing a DELETE")
     void deleteIsIdempotent() {
-        // Delete is a converged end state. A 404 here would make the retry of a half-finished
-        // cleanup fail forever.
+        // A 404 here would make retrying a half-finished cleanup fail forever.
         stubUserLookup("[]");
 
         assertThat(service.deleteUser(USER_ID)).isFalse();
@@ -383,11 +372,7 @@ class KeycloakServiceImplAdminTest {
         assertThat(form.get("username").toString()).contains(USER_ID);
     }
 
-    /**
-     * Keycloak refuses the password grant but still honours client_credentials. Both hit the same
-     * URL, so the stub discriminates on {@code grant_type}; matching on URL alone broke the admin
-     * lookup in the failure path and collapsed every diagnosis into a 503.
-     */
+    /** Refuses the password grant but honours client_credentials; same URL, so match on grant_type. */
     @SuppressWarnings("unchecked")
     private void stubPasswordGrantRefused() {
         lenient().when(restTemplate.exchange(contains("/protocol/openid-connect/token"),
@@ -432,8 +417,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("a refused grant we cannot explain -> 502, because it means the flow is misconfigured")
     void requestTokenRefusedForEnabledUserIsBadGateway() {
-        // The user exists and is enabled, so the direct grant flow should have issued a token. That
-        // is a configuration fault, not a caller error.
+        // An existing, enabled user was refused: a configuration fault, not a caller error.
         stubPasswordGrantRefused();
         stubUserLookup(existingUser(true));
 
@@ -469,8 +453,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("Keycloak's 400 invalid_grant becomes a 401, not a 502 — a refresh carries no userId")
     void refreshTokenRefusalIsAnInvalidToken() {
-        // Expired, malformed, already-used and session-ended all arrive as 400 invalid_grant, and
-        // explainRefusedGrant cannot help: its admin lookup is keyed on a userId this call lacks.
+        // All refusals are 400 invalid_grant, and there is no userId to explain them with.
         when(restTemplate.exchange(contains("/protocol/openid-connect/token"),
                 eq(HttpMethod.POST), any(), eq(Map.class)))
                 .thenThrow(HttpClientErrorException.create(HttpStatus.BAD_REQUEST, "invalid_grant",
@@ -500,8 +483,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("every field lands in its own place — six consecutive Strings transpose silently")
     void upsertCreatesWithEveryFieldDistinct() throws Exception {
-        // All eight values distinct and recognisable. The record names the components, but its
-        // constructor is still positional, so this is what actually catches a swapped pair.
+        // All eight distinct: the constructor is positional, so only this catches a swapped pair.
         stubUserLookup("[]");
 
         service.upsertUser(new KeycloakService.CatalogueUser(
@@ -528,8 +510,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("absent optional attributes are omitted entirely, so no claim is emitted for them")
     void upsertOmitsAbsentOptionalAttributes() throws Exception {
-        // Absent means no claim. Writing "" instead would fail the User Profile's min-length
-        // validator with a 400, which adminFailure has no branch for and reports as a bare 502.
+        // Absent, never "": a blank fails min-length validation as a bare 502.
         stubUserLookup("[]");
 
         service.upsertUser(userWithEmail("a@b.example"));
@@ -543,8 +524,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("an update that omits orgName and displayName carries the stored values forward")
     void updateOmittingOptionalAttributesCarriesThemForward() throws Exception {
-        // A Keycloak PUT that omits a key DELETES it, so "not mentioned" must mean "keep" — without
-        // this merge every identifiers-only republish would silently wipe both.
+        // A PUT that omits a key deletes it, so an identifiers-only republish must merge.
         stubUserLookup(existingUserWithAttributes("Bharat Agri", "FIELD_OFFICER"));
 
         service.upsertUser(basicUser());
@@ -573,9 +553,7 @@ class KeycloakServiceImplAdminTest {
     @Test
     @DisplayName("a stored entity_type is not carried forward — the rename is not a merge")
     void updateDropsTheRetiredAttributes() throws Exception {
-        // A user provisioned before the rename still holds entity_type and registries. Nothing reads
-        // either any more, and re-emitting them would keep the stale claims alive if a mapper for
-        // them were ever restored.
+        // Legacy entity_type/registries are not re-emitted, so stale claims cannot come back.
         stubUserLookup("[{\"id\":\"" + KC_ID + "\",\"username\":\"" + USER_ID + "\",\"enabled\":true,"
                 + "\"attributes\":{\"entity_type\":[\"CHECKER\"],\"registries\":[\"reg-a\"]}}]");
 

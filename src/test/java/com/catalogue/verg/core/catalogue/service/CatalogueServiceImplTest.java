@@ -38,11 +38,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/**
- * The credential check against the deployed catalogue contract: {email, password} in, 2xx +
- * result.userId for success, 401/403 for a rejection. The interesting half is which failures
- * must NOT become a 401.
- */
+/** The credential check against the catalogue contract: which failures must NOT become a 401. */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class CatalogueServiceImplTest {
@@ -126,8 +122,7 @@ class CatalogueServiceImplTest {
     @Test
     @DisplayName("a catalogue 403 (not ACTIVE) is also a 401, so the two are indistinguishable")
     void catalogueForbiddenIsAlsoInvalidCredentials() {
-        // The catalogue answers 403 "User is not active", which tells a caller the account exists.
-        // Collapsing it here stops us propagating that.
+        // The catalogue's 403 reveals the account exists; collapsing it stops that leaking.
         when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(), eq(JsonNode.class)))
                 .thenThrow(HttpClientErrorException.create(HttpStatus.FORBIDDEN,
                         "User is not active", null, null, null));
@@ -143,8 +138,7 @@ class CatalogueServiceImplTest {
     @Test
     @DisplayName("2xx with no userId is a 503 — never a token for the submitted email")
     void successWithoutUserIdIsUnavailable() {
-        // The tempting fallback — "use the email we were given" — would feed unvalidated caller
-        // input to Keycloak as a username.
+        // Falling back to the submitted email would hand unvalidated input to Keycloak.
         stubResponse("{\"result\":{\"status\":\"ACTIVE\"}}");
 
         assertThatThrownBy(() -> service.verifyCredentials(EMAIL, PASSWORD))
@@ -156,8 +150,7 @@ class CatalogueServiceImplTest {
     @Test
     @DisplayName("a 400 for a malformed request is a 503, not a rejection")
     void badRequestIsUnavailable() {
-        // "Email and password are required" means WE sent the wrong shape — a config or contract
-        // fault, not the user's password being wrong.
+        // A 400 means we sent the wrong shape: a contract fault, not a wrong password.
         when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(), eq(JsonNode.class)))
                 .thenThrow(HttpClientErrorException.create(HttpStatus.BAD_REQUEST,
                         "Email and password are required", null, null, null));

@@ -29,10 +29,7 @@ public class KeycloakConfig {
     @Value("${keycloak.read-timeout-ms}")
     private int readTimeoutMs;
 
-    /**
-     * Dedicated RestTemplate with timeouts: Spring supplies none, so a hung Keycloak would hold the
-     * request thread indefinitely. The long setter names are required below Boot 3.4.
-     */
+    /** RestTemplate with timeouts (Spring sets none); the long setter names are needed below Boot 3.4. */
     @Bean
     public RestTemplate keycloakRestTemplate() {
         return new RestTemplateBuilder()
@@ -41,10 +38,7 @@ public class KeycloakConfig {
                 .build();
     }
 
-    /**
-     * Supplies Keycloak's signing keys so tokens verify without calling it. The cache is keyed by
-     * kid, so a rotated key is simply a miss; the rate limit caps forged-kid lookups.
-     */
+    /** Cached JWKS so tokens verify locally; a rotated kid is a cache miss, rate-limited against forgery. */
     @Bean
     public JwkProvider jwkProvider() {
         String jwksUrl = keycloakBaseUrl + "/realms/" + keycloakRealm + "/protocol/openid-connect/certs";

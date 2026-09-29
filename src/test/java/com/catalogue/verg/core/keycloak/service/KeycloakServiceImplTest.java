@@ -36,10 +36,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
-/**
- * Token verification, where a mistake is an auth bypass rather than a bug. Container-free: an RSA
- * key pair is generated in-process, tokens are minted with java-jwt, and JwkProvider is stubbed.
- */
+/** Token verification, where a mistake is an auth bypass; keys and tokens are made in-process. */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class KeycloakServiceImplTest {
@@ -73,10 +70,7 @@ class KeycloakServiceImplTest {
     @Mock
     private org.springframework.data.redis.core.HashOperations<String, Object, Object> hashOperations;
 
-    /**
-     * Collaborators are field-injected in production, so they are set by reflection here rather than
-     * through a constructor.
-     */
+    /** Field-injected in production, so collaborators are set by reflection. */
     @Mock
     private org.springframework.web.client.RestTemplate restTemplate;
 
@@ -88,8 +82,7 @@ class KeycloakServiceImplTest {
         publicKey = (RSAPublicKey) pair.getPublic();
         privateKey = (RSAPrivateKey) pair.getPrivate();
 
-        // VergProperties is a plain @Value holder, so it can just be populated here rather than
-        // standing up a Spring context.
+        // VergProperties is a plain @Value holder, so no Spring context is needed.
         VergProperties props = new VergProperties();
         props.setKeycloakIssuer(ISSUER);
         props.setKeycloakBaseUrl("http://localhost:8180");
@@ -125,9 +118,7 @@ class KeycloakServiceImplTest {
                 .withClaim("azp", CLIENT_ID)
                 .withClaim("sid", "session-123")
                 .withClaim("preferred_username", "user-000000000001")
-                // Real tokens carry the client in aud, from the audience mapper setup-realm.sh adds.
-                // Without it Keycloak refuses to introspect, and the Redis-outage fallback in
-                // isActiveAccordingToKeycloak would reject every valid token.
+                // Real tokens carry the client in aud; without it introspection (the Redis fallback) rejects all.
                 .withAudience(CLIENT_ID)
                 // Real tokens carry these from the oas-profile client scope.
                 .withClaim("user_id", "user-000000000001")
@@ -145,9 +136,7 @@ class KeycloakServiceImplTest {
         return builder.sign(Algorithm.RSA256(null, key));
     }
 
-    // -----------------------------------------------------------------------------------
-    // the happy path
-    // -----------------------------------------------------------------------------------
+    // --- the happy path ---
 
     @Test
     @DisplayName("a well-formed access token is accepted")
@@ -160,17 +149,12 @@ class KeycloakServiceImplTest {
         assertThat(decoded.getIssuer()).isEqualTo(ISSUER);
     }
 
-    // -----------------------------------------------------------------------------------
-    // THE auth-bypass test
-    // -----------------------------------------------------------------------------------
+    // --- THE auth-bypass test ---
 
     @Test
     @DisplayName("a token signed with the PUBLIC KEY as an HMAC secret is rejected")
     void rejectsAlgorithmConfusionAttack() {
-        // Algorithm confusion: the JWKS public key is public, so an attacker can use its bytes as
-        // an HMAC secret and set alg=HS256. A header-trusting verifier accepts it, because for HMAC
-        // the signing and verifying key are the same. RS256 is pinned in code, so this fails if
-        // anyone "simplifies" that line to read alg from the header.
+        // Algorithm confusion: the public key used as an HS256 secret must fail while RS256 is pinned.
         String publicKeyAsSecret = Base64.getEncoder().encodeToString(publicKey.getEncoded());
         String forged = JWT.create()
                 .withKeyId(KID)
@@ -192,9 +176,7 @@ class KeycloakServiceImplTest {
                 });
     }
 
-    // -----------------------------------------------------------------------------------
-    // the individual checks
-    // -----------------------------------------------------------------------------------
+    // --- the individual checks ---
 
     @Test
     @DisplayName("a token signed by a different key is rejected")
@@ -217,8 +199,7 @@ class KeycloakServiceImplTest {
         String[] parts = token.split("\\.");
         String signature = parts[2];
 
-        // First character, not last: the final base64url char of an RSA-2048 signature carries only
-        // 2 significant bits, so flipping it often decodes to the same bytes and the test flakes.
+        // First char, not last: the last base64url char of RSA-2048 carries 2 bits, so flipping it flakes.
         char original = signature.charAt(0);
         String tampered = parts[0] + "." + parts[1] + "."
                 + (original == 'A' ? 'B' : 'A') + signature.substring(1);
@@ -251,9 +232,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("a REFRESH token is rejected even though it is validly signed")
     void rejectsRefreshToken() {
-        // Keycloak signs refresh tokens with the same key, so this passes signature, issuer and
-        // azp. Only the typ check stops it. Without that, a refresh token would be accepted as
-        // proof of identity.
+        // Same key, issuer and azp as an access token: only the typ check stops a refresh token.
         String token = sign(validToken().withClaim("typ", "Refresh"), privateKey);
 
         assertThatThrownBy(() -> service.verifyToken(token, false))
@@ -275,8 +254,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("an expired token IS accepted when ignoreExpiry is set, so it can be revoked")
     void acceptsExpiredTokenWhenIgnoringExpiry() {
-        // invalidate must work on an expired access token: its session may still have live
-        // siblings, and those are exactly what needs killing.
+        // Invalidate must accept an expired token: its session may still have live siblings.
         String token = sign(validToken()
                 .withExpiresAt(new Date(System.currentTimeMillis() - 600_000)), privateKey);
 
@@ -300,9 +278,7 @@ class KeycloakServiceImplTest {
                 .hasFieldOrPropertyWithValue("code", Constants.AUTH_TOKEN_INVALID);
     }
 
-    // -----------------------------------------------------------------------------------
-    // the denylist
-    // -----------------------------------------------------------------------------------
+    // --- the denylist ---
 
     @Test
     @DisplayName("a token whose jti is on the denylist is rejected")
@@ -319,8 +295,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("a token whose SESSION was revoked is rejected, even with a fresh jti")
     void rejectsRevokedBySid() {
-        // This is why the sid entry exists. Every refresh mints a new access token with a new jti;
-        // revoking one jti would leave the rest of the session working.
+        // Why the sid entry exists: each refresh mints a new jti, so one jti leaves the session alive.
         String token = sign(validToken(), privateKey);
         when(stringRedisTemplate.hasKey("auth:denylist:sid:session-123")).thenReturn(true);
 
@@ -332,8 +307,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("a token whose USER was revoked is rejected, even with a fresh jti and session")
     void rejectsRevokedByUser() {
-        // Blocking an account has to kill tokens that are already out in the wild. Disabling the
-        // user upstream only stops the next login.
+        // Blocking must kill tokens already issued; disabling upstream only stops the next login.
         String token = sign(validToken(), privateKey);
         when(stringRedisTemplate.hasKey("auth:denylist:user:user-000000000001")).thenReturn(true);
 
@@ -345,8 +319,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("user revocation still works when the token has no user_id claim")
     void rejectsRevokedByUserFallsBackToUsername() {
-        // The user_id claim only exists if the oas-profile scope was applied. If that scope is ever
-        // detached, revocation must not silently stop working — hence the preferred_username fallback.
+        // user_id needs the oas-profile scope; preferred_username keeps revocation working without it.
         String token = sign(JWT.create()
                 .withKeyId(KID).withIssuer(ISSUER).withJWTId("jti-nofallback")
                 .withClaim("typ", "Bearer").withClaim("azp", CLIENT_ID)
@@ -374,8 +347,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("when Redis is down, falls back to Keycloak introspection and accepts an active token")
     void fallsBackToIntrospectionWhenRedisUnavailable() {
-        // Redis failures used to be fatal (503). They now degrade to one introspection call, so a
-        // Redis outage no longer takes authentication down with it.
+        // A Redis outage degrades to one introspection call instead of failing auth.
         String token = sign(validToken(), privateKey);
         when(stringRedisTemplate.hasKey(anyString()))
                 .thenThrow(new org.springframework.dao.QueryTimeoutException("redis down"));
@@ -389,8 +361,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("Redis down and Keycloak says inactive -> rejected")
     void rejectsWhenIntrospectionSaysInactive() {
-        // Covers a logged-out session and a disabled user; both were confirmed against a live
-        // Keycloak to report active=false.
+        // Covers a logged-out session and a disabled user; both verified live to report active=false.
         String token = sign(validToken(), privateKey);
         when(stringRedisTemplate.hasKey(anyString()))
                 .thenThrow(new org.springframework.dao.QueryTimeoutException("redis down"));
@@ -432,9 +403,7 @@ class KeycloakServiceImplTest {
 
         service.recordSession(jwt);
 
-        // The key is pinned, not just the value: recordSession builds this JSON by hand, so a claim
-        // rename that misses it would leave the session index on the old key with nothing failing —
-        // nothing in this service ever reads these records back.
+        // Key pinned too: nothing reads these back, so a claim rename that missed it would fail silently.
         org.mockito.Mockito.verify(valueOperations).set(
                 org.mockito.ArgumentMatchers.eq("auth:session:session-123"),
                 org.mockito.ArgumentMatchers.contains("\"functional_role\":\"MAKER\""),
@@ -447,8 +416,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("a failed session write does not fail the login")
     void recordSessionIsBestEffort() {
-        // The token is already valid and the denylist still governs revocation, so an index write
-        // failure must not turn a good login into an error.
+        // The denylist still governs, so an index write failure must not fail a good login.
         when(stringRedisTemplate.opsForValue())
                 .thenThrow(new org.springframework.dao.QueryTimeoutException("redis down"));
 
@@ -458,8 +426,7 @@ class KeycloakServiceImplTest {
     @Test
     @DisplayName("revoking a user denylists every one of its sessions and clears the index")
     void revokeUserClearsEverySession() {
-        // The point of the session index: without it, revocation relies on one user-level entry
-        // expiring and individual sids are never denylisted.
+        // Without the index, revocation would rely on one user-level entry expiring.
         when(setOperations.members("auth:user:user-000000000001:sessions"))
                 .thenReturn(new java.util.LinkedHashSet<>(java.util.List.of("sid-a", "sid-b")));
 

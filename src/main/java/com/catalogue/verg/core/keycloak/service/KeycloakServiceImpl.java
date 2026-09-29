@@ -112,8 +112,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         if (StringUtils.isNotBlank(vergProperties.getKeycloakClientSecret())) {
             form.add("client_secret", vergProperties.getKeycloakClientSecret());
         }
-        // No password field: the realm's direct grant flow has no password step, so Keycloak
-        // resolves the user and enforces `enabled` only. setup-realm.sh step 4 is the other half.
+        // No password field: the realm's direct grant has no password step (setup-realm.sh step 4).
 
         try {
             ResponseEntity<Map> response = restTemplate.exchange(
@@ -130,8 +129,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    /** Keycloak returns invalid_grant for both unknown and disabled. No password here, so one
-     * admin lookup on the failure path is safe and tells the caller which it was. */
+    /** invalid_grant hides unknown vs disabled; one admin lookup on the failure path tells them apart. */
     private CustomException explainRefusedGrant(String userId) {
         JsonNode user;
         try {
@@ -167,8 +165,7 @@ public class KeycloakServiceImpl implements KeycloakService {
             throw invalidToken("not a well-formed JWT");
         }
 
-        // RS256 pinned, never read from the header: the public key is published, so a header-trusting
-        // verifier accepts a token signed with that key as an HS256 secret.
+        // RS256 pinned, never from the header: else the published key could sign as an HS256 secret.
         try {
             Jwk jwk = jwkProvider.get(decoded.getKeyId());
             Algorithm.RSA256((java.security.interfaces.RSAPublicKey) jwk.getPublicKey(), null).verify(decoded);
@@ -245,10 +242,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    /**
-     * Denylists one token and its session. Both are needed: every refresh mints a new jti, so
-     * revoking the jti alone leaves its siblings live. Values are a constant "1", never the token.
-     */
+    /** Denylists the token and its session (refreshes mint new jtis); values are "1", never the token. */
     @Override
     public void revokeToken(DecodedJWT jwt) {
         try {
@@ -278,10 +272,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    /**
-     * Revokes every live token for a user; disabling upstream only stops the next login.
-     * Keyed on {@code user_id}, not {@code sub}, so callers pass the catalogue id they already hold.
-     */
+    /** Revokes every token for a userId (user_id, not sub); disabling alone only stops the next login. */
     @Override
     public void revokeUser(String userId) {
         try {
@@ -438,14 +429,7 @@ public class KeycloakServiceImpl implements KeycloakService {
                 Constants.AUTH_TOKEN_REVOKED_MSG, HttpStatus.UNAUTHORIZED);
     }
 
-    /**
-     * Creates or updates the Keycloak user, never a credential. Also the re-enable path.
-     *
-     * <p>Idempotent because the caller pushes here before persisting ACTIVE: a 409 on its retry
-     * would wedge the record. The update rewrites enabled and all attributes, so it repairs drift.
-     *
-     * @return true only when a user was created
-     */
+    /** Idempotent upsert, since the caller retries before persisting ACTIVE; true only when created. */
     @Override
     public boolean upsertUser(CatalogueUser user) {
         String userId = user.userId();
@@ -460,8 +444,7 @@ public class KeycloakServiceImpl implements KeycloakService {
                 restTemplate.exchange(adminUsersUrl(), HttpMethod.POST,
                         adminEntity(userPayload(user, true).toString()), String.class);
             } catch (HttpClientErrorException.Conflict e) {
-                // Either a concurrent publish of this user, or the email belongs to someone else.
-                // Only the first is recoverable; the second must surface as a 409.
+                // A concurrent publish of this user converges; someone else's email must surface as a 409.
                 JsonNode raced = findUser(userId);
                 if (raced == null) {
                     log.warn("KeycloakServiceImpl::upsertUser: {} conflicts with another identity", userId);
@@ -484,14 +467,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    /**
-     * A Keycloak PUT that omits a field CLEARS it (verified), so "not mentioned" must mean "keep".
-     *
-     * <p>The merge is resolved into a record before the payload is built rather than inline in the
-     * call: note that email/firstName/lastName are TOP-LEVEL Keycloak fields while orgName and
-     * displayName are attributes, and reading either through the other's accessor compiles fine and
-     * silently wipes the value on every republish.
-     */
+    /** A PUT clears omitted fields, so merge stored values first (names top-level, org/display attributes). */
     private void updateUser(JsonNode existing, CatalogueUser user) {
         CatalogueUser merged = new CatalogueUser(
                 user.userId(),
@@ -533,26 +509,13 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    /**
-     * Reads a single-valued custom attribute back off the stored user. Keycloak represents every
-     * attribute as an array, so the value is element 0; findUser already returned attributes, so
-     * this costs no extra round trip.
-     *
-     * <p>The isTextual guard is load-bearing: MissingNode.asText() is "" and NullNode.asText() is
-     * the literal "null", either of which would carry forward as though it were a real value.
-     */
+    /** First value of a stored attribute, or null; isTextual stops "" and "null" carrying forward. */
     private String existingAttribute(JsonNode existing, String name) {
         JsonNode first = existing.path("attributes").path(name).path(0);
         return first.isTextual() ? StringUtils.trimToNull(first.asText()) : null;
     }
 
-    /**
-     * Sets {@code enabled=false} and ends every Keycloak session.
-     *
-     * <p>A Keycloak failure returns false rather than throwing, since the Redis revocation already
-     * stopped anyone holding a live token. An absent user throws 404 instead: nothing was revoked,
-     * so a wrong identifier must not look like success. Takes the userId, not the email.
-     */
+    /** enabled=false plus logout; false on a Keycloak failure (Redis already revoked), 404 if absent. */
     @Override
     public boolean disableUser(String userId) {
         try {
@@ -564,8 +527,7 @@ public class KeycloakServiceImpl implements KeycloakService {
                         Constants.AUTH_USER_NOT_FOUND_MSG, HttpStatus.NOT_FOUND);
             }
             String kcId = existing.path("id").asText();
-            // Partial payload: Keycloak only touches `attributes` when the key is present, so the
-            // custom attributes survive without a read-modify-write.
+            // Partial payload: attributes are untouched when the key is absent.
             restTemplate.exchange(adminUsersUrl() + "/" + kcId, HttpMethod.PUT,
                     adminEntity("{\"enabled\":false}"), String.class);
             restTemplate.exchange(adminUsersUrl() + "/" + kcId + "/logout", HttpMethod.POST,
@@ -581,10 +543,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    /**
-     * Deletes the Keycloak user; false when there was nothing to delete. Throws where
-     * {@link #disableUser} swallows, because a failed delete leaves nothing else in force.
-     */
+    /** Deletes the user; false when absent. Throws, unlike disableUser: nothing else would be in force. */
     @Override
     public boolean deleteUser(String userId) {
         try {
@@ -634,8 +593,7 @@ public class KeycloakServiceImpl implements KeycloakService {
             // Without this Keycloak raises VERIFY_EMAIL and the grant fails "not fully set up".
             user.put("emailVerified", true);
         }
-        // Stored as Keycloak's own fields, but projected by OUR first_name/last_name mappers: the
-        // built-in profile scope's given_name/family_name mappers are deleted by setup-realm.sh.
+        // Keycloak's own fields, projected by our first_name/last_name mappers (see setup-realm.sh).
         if (StringUtils.isNotBlank(catalogueUser.firstName())) {
             user.put("firstName", catalogueUser.firstName());
         }
@@ -646,9 +604,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         attributes.putArray(CLAIM_USER_ID).add(catalogueUser.userId());
         attributes.putArray(CLAIM_ORG_ID).add(catalogueUser.orgId());
         attributes.putArray(CLAIM_FUNCTIONAL_ROLE).add(catalogueUser.functionalRole());
-        // Optional, and omitting the key is how Keycloak clears an attribute, so a blank needs no
-        // branch of its own. An empty value would fail the User Profile's min-length validator
-        // with a 400, which adminFailure has no branch for and would report as a bare 502.
+        // Omitting the key clears it; an empty value would fail min-length and surface as a bare 502.
         if (StringUtils.isNotBlank(catalogueUser.orgName())) {
             attributes.putArray(CLAIM_ORG_NAME).add(catalogueUser.orgName());
         }
@@ -658,11 +614,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         return user;
     }
 
-    /**
-     * A token for the client's own service account, cached until shortly before expiry. Uses the
-     * client credentials already configured, so no admin password exists anywhere; the account
-     * holds only {@code manage-users} and {@code view-users}.
-     */
+    /** Service-account token (manage-users, view-users only), cached until just before expiry. */
     @SuppressWarnings("unchecked")
     private String adminToken() {
         if (adminAccessToken != null && Instant.now().isBefore(adminAccessTokenExpiresAt)) {
@@ -686,8 +638,7 @@ public class KeycloakServiceImpl implements KeycloakService {
                     throw idpFailed();
                 }
                 long expiresIn = body.get("expires_in") instanceof Number n ? n.longValue() : 0L;
-                // Refresh early: a token dying mid-request looks like a failed publish to the
-                // catalogue. Flooring at 0 means a token shorter than the skew is never cached.
+                // Refresh early so a token never dies mid-request; one shorter than the skew is not cached.
                 adminAccessTokenExpiresAt = Instant.now()
                         .plusSeconds(Math.max(expiresIn - ADMIN_TOKEN_SKEW_SECONDS, 0));
                 adminAccessToken = token;
@@ -713,11 +664,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         return new HttpEntity<>(json, headers);
     }
 
-    /**
-     * Clears the user-level denylist entry {@code revokeUser} wrote, which also rejects new tokens —
-     * without this a republish reports success while every login fails until the TTL expires.
-     * Per-session entries stay: tokens issued before the block remain dead.
-     */
+    /** Clears the user-level block so a republish can log in at once; per-session entries stay dead. */
     private void clearUserDenylist(String userId) {
         try {
             stringRedisTemplate.delete(DENYLIST_USER_PREFIX + userId);
@@ -787,9 +734,7 @@ public class KeycloakServiceImpl implements KeycloakService {
                     tokenEndpoint(), HttpMethod.POST, formEntity(form), Map.class);
             return response.getBody();
         } catch (HttpClientErrorException e) {
-            // Keycloak answers 400 invalid_grant for expired, malformed, already-used and
-            // session-ended refresh tokens alike, so they collapse into one 401. Not
-            // explainRefusedGrant: that lookup is keyed on a userId, and a refresh carries none.
+            // Every refusal is 400 invalid_grant, so all become one 401; there is no userId to explain it with.
             log.warn("KeycloakServiceImpl::refreshToken: refresh refused (status={})", e.getStatusCode());
             throw invalidToken("refresh token refused by Keycloak");
         } catch (RestClientException e) {
@@ -798,10 +743,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         }
     }
 
-    /**
-     * True if this token, its session or its user is revoked. Falls back to Keycloak introspection
-     * when Redis cannot answer, and fails closed when neither can.
-     */
+    /** Denylisted token, session or user; falls back to introspection, fails closed if both are down. */
     private boolean isRevoked(DecodedJWT jwt) {
         try {
             if (Boolean.TRUE.equals(stringRedisTemplate.hasKey(DENYLIST_JTI_PREFIX + jwt.getId()))) {
