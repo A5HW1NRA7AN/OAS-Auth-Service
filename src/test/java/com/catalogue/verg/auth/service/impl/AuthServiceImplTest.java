@@ -494,4 +494,204 @@ class AuthServiceImplTest {
                 .containsEntry("email", "asha@example.org")
                 .doesNotContainKeys("given_name", "family_name");
     }
+
+    // ── PIN login: enrolment on auth_token_create ──────────────────────────────────────────────
+
+    private static final String LOGIN = "{\"email\":\"asha@example.org\",\"password\":\"pw\"";
+    private static final String HANDLE = "device-handle";
+
+    @Test
+    @DisplayName("pinLogin after a verified password enrols the device and adds its handle to the tokens")
+    void pinLoginEnrolsAfterVerification() {
+        props.setCatalogueValidateEnabled(true);
+        when(catalogueService.verifyCredentials("asha@example.org", "pw")).thenReturn(USER_ID);
+        when(keycloakService.enrolDevice(USER_ID, "Asha's Pixel"))
+                .thenReturn(new KeycloakService.DeviceEnrolment(HANDLE, "device-1"));
+        when(keycloakService.requestToken(USER_ID))
+                .thenReturn(new java.util.HashMap<>(java.util.Map.of("access_token", "at")));
+
+        CustomResponse response = service.authTokenCreate(
+                json(LOGIN + ",\"pinLogin\":true,\"deviceLabel\":\"Asha's Pixel\"}"));
+
+        assertThat(response.getResult())
+                .containsEntry("access_token", "at")
+                .containsEntry(Constants.AUTH_FIELD_DEVICE_HANDLE, HANDLE)
+                .containsEntry(Constants.AUTH_FIELD_DEVICE_ID, "device-1");
+        // Enrolled before the token is issued, so a failed enrolment hands out nothing.
+        InOrder order = inOrder(catalogueService, keycloakService);
+        order.verify(catalogueService).verifyCredentials("asha@example.org", "pw");
+        order.verify(keycloakService).enrolDevice(USER_ID, "Asha's Pixel");
+        order.verify(keycloakService).requestToken(USER_ID);
+    }
+
+    @Test
+    @DisplayName("without pinLogin the response is Keycloak's own map and no device is enrolled")
+    void noPinLoginLeavesTheContractUntouched() {
+        props.setCatalogueValidateEnabled(true);
+        when(catalogueService.verifyCredentials("asha@example.org", "pw")).thenReturn(USER_ID);
+        java.util.Map<String, Object> tokens = new java.util.HashMap<>(java.util.Map.of("access_token", "at"));
+        when(keycloakService.requestToken(USER_ID)).thenReturn(tokens);
+
+        CustomResponse response = service.authTokenCreate(json(LOGIN + "}"));
+
+        assertThat(response.getResult()).isSameAs(tokens);
+        verify(keycloakService, never()).enrolDevice(anyString(), any());
+    }
+
+    @Test
+    @DisplayName("pinLogin is ignored in trusted mode — no device without a checked password")
+    void pinLoginIsIgnoredWhenNothingWasVerified() {
+        when(keycloakService.requestToken(USER_ID))
+                .thenReturn(new java.util.HashMap<>(java.util.Map.of("access_token", "at")));
+
+        CustomResponse response = service.authTokenCreate(
+                json("{\"userId\":\"" + USER_ID + "\",\"pinLogin\":true}"));
+
+        verify(keycloakService, never()).enrolDevice(anyString(), any());
+        assertThat(response.getResult()).doesNotContainKey(Constants.AUTH_FIELD_DEVICE_HANDLE);
+    }
+
+    // ── PIN login: auth_token_create_pin ───────────────────────────────────────────────────────
+
+    private JsonNode pinRequest(String pin) {
+        return json("{\"deviceHandle\":\"" + HANDLE + "\",\"pin\":\"" + pin + "\"}");
+    }
+
+    @Test
+    @DisplayName("a right PIN issues tokens for the DEVICE's user, through the normal issuance path")
+    void rightPinIssuesTokensForTheDevicesUser() {
+        when(keycloakService.claimPinAttempt(HANDLE)).thenReturn(USER_ID);
+        when(keycloakService.requestToken(USER_ID))
+                .thenReturn(new java.util.HashMap<>(java.util.Map.of("access_token", "at")));
+
+        CustomResponse response = service.authTokenCreatePin(pinRequest("482913"));
+
+        assertThat(response.getResult()).containsEntry("access_token", "at");
+        InOrder order = inOrder(keycloakService, catalogueService);
+        order.verify(keycloakService).claimPinAttempt(HANDLE);
+        order.verify(catalogueService).verifyPin(USER_ID, "482913");
+        order.verify(keycloakService).settlePinAttempt(HANDLE, KeycloakService.PinAttempt.CORRECT);
+        order.verify(keycloakService).requestToken(USER_ID);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"pin\":\"482913\"}", "{\"deviceHandle\":\"device-handle\"}"})
+    @DisplayName("a PIN login missing either half is a 400 and spends no attempt")
+    void pinLoginNeedsBothHalves(String body) {
+        assertThatThrownBy(() -> service.authTokenCreatePin(json(body)))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_REQUEST);
+        verify(keycloakService, never()).claimPinAttempt(anyString());
+        verify(catalogueService, never()).verifyPin(anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("a wrong PIN is a 401, the attempt stays spent, and no token is issued")
+    void wrongPinIsRefused() {
+        when(keycloakService.claimPinAttempt(HANDLE)).thenReturn(USER_ID);
+        doThrow(new CustomException(Constants.AUTH_INVALID_CREDENTIALS,
+                Constants.AUTH_INVALID_CREDENTIALS_MSG, HttpStatus.UNAUTHORIZED))
+                .when(catalogueService).verifyPin(USER_ID, "000001");
+
+        assertThatThrownBy(() -> service.authTokenCreatePin(pinRequest("000001")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_CREDENTIALS);
+        verify(keycloakService).settlePinAttempt(HANDLE, KeycloakService.PinAttempt.WRONG);
+        verify(keycloakService, never()).requestToken(anyString());
+    }
+
+    @Test
+    @DisplayName("the last allowed wrong PIN reports the device as revoked")
+    void lastWrongPinRevokesTheDevice() {
+        when(keycloakService.claimPinAttempt(HANDLE)).thenReturn(USER_ID);
+        doThrow(new CustomException(Constants.AUTH_INVALID_CREDENTIALS,
+                Constants.AUTH_INVALID_CREDENTIALS_MSG, HttpStatus.UNAUTHORIZED))
+                .when(catalogueService).verifyPin(USER_ID, "000001");
+        when(keycloakService.settlePinAttempt(HANDLE, KeycloakService.PinAttempt.WRONG)).thenReturn(true);
+
+        assertThatThrownBy(() -> service.authTokenCreatePin(pinRequest("000001")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_TOKEN_REVOKED);
+        verify(keycloakService, never()).requestToken(anyString());
+    }
+
+    @Test
+    @DisplayName("a catalogue outage is a 503 that gives the attempt back")
+    void catalogueOutageRefundsTheAttempt() {
+        when(keycloakService.claimPinAttempt(HANDLE)).thenReturn(USER_ID);
+        doThrow(new CustomException(Constants.AUTH_UPSTREAM_UNAVAILABLE,
+                Constants.AUTH_UPSTREAM_UNAVAILABLE_MSG, HttpStatus.SERVICE_UNAVAILABLE))
+                .when(catalogueService).verifyPin(USER_ID, "482913");
+
+        assertThatThrownBy(() -> service.authTokenCreatePin(pinRequest("482913")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.SERVICE_UNAVAILABLE);
+        verify(keycloakService).settlePinAttempt(HANDLE, KeycloakService.PinAttempt.UNCHECKED);
+        verify(keycloakService, never()).requestToken(anyString());
+    }
+
+    @Test
+    @DisplayName("an unknown device never reaches the catalogue")
+    void unknownDeviceNeverReachesTheCatalogue() {
+        when(keycloakService.claimPinAttempt(HANDLE)).thenThrow(new CustomException(
+                Constants.AUTH_TOKEN_INVALID, Constants.AUTH_TOKEN_INVALID_MSG, HttpStatus.UNAUTHORIZED));
+
+        assertThatThrownBy(() -> service.authTokenCreatePin(pinRequest("482913")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_TOKEN_INVALID);
+        verify(catalogueService, never()).verifyPin(anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("logout ends the session but not the device — logging out is not forgetting a device")
+    void invalidateNeverForgetsDevices() {
+        DecodedJWT jwt = JWT.decode(JWT.create().withJWTId("jti-1").withClaim("user_id", USER_ID)
+                .sign(Algorithm.HMAC256("test")));
+        when(keycloakService.verifyToken("a-token", true)).thenReturn(jwt);
+
+        service.authTokenInvalidate(json("{\"token\":\"a-token\"}"));
+
+        verify(keycloakService).revokeToken(jwt);
+        // Devices are only ever removed inside revokeUser, which logout must never call.
+        verify(keycloakService, never()).revokeUser(anyString());
+    }
+
+    // ── auth_user_update ───────────────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("user update REPLACES through replaceUser and never touches the upsert")
+    void userUpdateReplacesAndNeverUpserts() {
+        CustomResponse response = service.authUserUpdate(json("{\"userId\":\"" + USER_ID + "\","
+                + "\"orgId\":\"org-1\",\"functionalRole\":\"MAKER\",\"email\":\"asha@example.org\","
+                + "\"displayName\":\"Asha R\"}"));
+
+        verify(keycloakService).replaceUser(new KeycloakService.CatalogueUser(USER_ID, "org-1", "MAKER",
+                "asha@example.org", null, null, null, "Asha R"));
+        // The upsert re-enables and clears the denylist, which would un-revoke a revoked user.
+        verify(keycloakService, never()).upsertUser(any());
+        assertThat(response.getResult()).containsEntry("updated", true);
+    }
+
+    @Test
+    @DisplayName("user update requires the same fields as create")
+    void userUpdateRequiresTheSameFieldsAsCreate() {
+        assertThatThrownBy(() -> service.authUserUpdate(json(
+                "{\"userId\":\"" + USER_ID + "\",\"orgId\":\"org-1\",\"functionalRole\":\"MAKER\"}")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_REQUEST);
+        verify(keycloakService, never()).replaceUser(any());
+    }
+
+    @Test
+    @DisplayName("user update on a user that was never published propagates the 404")
+    void userUpdateOnUnknownUserIsNotFound() {
+        doThrow(new CustomException(Constants.AUTH_USER_NOT_FOUND,
+                Constants.AUTH_USER_NOT_FOUND_MSG, HttpStatus.NOT_FOUND))
+                .when(keycloakService).replaceUser(any());
+
+        assertThatThrownBy(() -> service.authUserUpdate(json("{\"userId\":\"" + USER_ID + "\","
+                + "\"orgId\":\"org-1\",\"functionalRole\":\"MAKER\",\"email\":\"asha@example.org\"}")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.NOT_FOUND);
+    }
 }

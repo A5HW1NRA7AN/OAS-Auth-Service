@@ -127,6 +127,70 @@
       }
     },
     {
+      "name": "Create Token (PIN enrolment)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"test.user@example.com\",\n  \"password\": \"test123\",\n  \"pinLogin\": true,\n  \"deviceLabel\": \"Test device\"\n}"
+        },
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_create",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_create"
+          ]
+        },
+        "description": "Login that also enrols this device for PIN login. Copy deviceHandle from the response."
+      }
+    },
+    {
+      "name": "Create Token with PIN",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"deviceHandle\": \"PASTE_DEVICE_HANDLE\",\n  \"pin\": \"123456\"\n}"
+        },
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_token_create_pin",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_token_create_pin"
+          ]
+        },
+        "description": "PIN login. Needs the deviceHandle from Create Token (PIN enrolment). Five wrong PINs remove the device."
+      }
+    },
+    {
       "name": "Refresh Token",
       "request": {
         "method": "POST",
@@ -220,6 +284,38 @@
           ]
         },
         "description": "Kills this one token and ends its Keycloak session. Validate Token then returns 401 revoked, but a fresh Create Token still works."
+      }
+    },
+    {
+      "name": "Update User",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "apikey",
+            "value": "{{api_key}}"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"userId\": \"PASTE_USER_ID\",\n  \"orgId\": \"org-000000000001\",\n  \"functionalRole\": \"MAKER\",\n  \"email\": \"test.user@example.com\",\n  \"firstName\": \"test\",\n  \"lastName\": \"user\",\n  \"orgName\": \"Ethiopian Institute of Agricultural Research\",\n  \"displayName\": \"FIELD_OFFICER\"\n}"
+        },
+        "url": {
+          "raw": "{{auth_url}}/auth/v1/auth_user_update",
+          "host": [
+            "{{auth_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "auth_user_update"
+          ]
+        },
+        "description": "The call the catalogue makes on an edit. Replaces: an omitted optional field is cleared. Never re-enables a revoked user."
       }
     },
     {

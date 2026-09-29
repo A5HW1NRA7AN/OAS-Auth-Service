@@ -49,6 +49,7 @@ class CatalogueServiceImplTest {
 
     private static final String BASE_URL = "http://localhost:8082";
     private static final String VERIFY_PATH = "/user/v1/verify";
+    private static final String VERIFY_PIN_PATH = "/user/v1/verify_pin";
     private static final String EMAIL = "asha@example.org";
     private static final String PASSWORD = "Sup3r-S3cret!";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -62,6 +63,7 @@ class CatalogueServiceImplTest {
         VergProperties props = new VergProperties();
         props.setCatalogueBaseUrl(BASE_URL);
         props.setCatalogueVerifyPath(VERIFY_PATH);
+        props.setCatalogueVerifyPinPath(VERIFY_PIN_PATH);
         ReflectionTestUtils.setField(service, "vergProperties", props);
     }
 
@@ -235,6 +237,76 @@ class CatalogueServiceImplTest {
             assertThat(appender.list)
                     .as("a log line leaked the password")
                     .noneMatch(event -> event.getFormattedMessage().contains(PASSWORD));
+        } finally {
+            logger.setLevel(original);
+            logger.detachAppender(appender);
+        }
+    }
+
+    // ── verifyPin ──────────────────────────────────────────────────────────────────────────────
+
+    private static final String PIN = "482913";
+
+    @Test
+    @DisplayName("verifyPin posts {userId, pin} to base-url + verify-pin-path")
+    void verifyPinPostsToItsOwnPath() {
+        stubResponse("{\"result\":{\"userId\":\"user-1\",\"status\":\"ACTIVE\"}}");
+
+        service.verifyPin("user-1", PIN);
+
+        ArgumentCaptor<HttpEntity> request = ArgumentCaptor.forClass(HttpEntity.class);
+        verify(restTemplate).exchange(eq(BASE_URL + VERIFY_PIN_PATH), eq(HttpMethod.POST),
+                request.capture(), eq(JsonNode.class));
+        @SuppressWarnings("unchecked")
+        Map<String, String> body = (Map<String, String>) request.getValue().getBody();
+        assertThat(body)
+                .containsEntry("userId", "user-1")
+                .containsEntry("pin", PIN)
+                .doesNotContainKey("email");
+    }
+
+    @Test
+    @DisplayName("a wrong PIN is an invalid-credentials 401, the code the five-strike rule counts")
+    void wrongPinIsInvalidCredentials() {
+        when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(), eq(JsonNode.class)))
+                .thenThrow(HttpClientErrorException.create(HttpStatus.UNAUTHORIZED,
+                        "Unauthorized", null, null, null));
+
+        assertThatThrownBy(() -> service.verifyPin("user-1", PIN))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_INVALID_CREDENTIALS);
+    }
+
+    @Test
+    @DisplayName("a 2xx for a DIFFERENT user is a 503, never a successful PIN")
+    void verifyPinForAnotherUserIsUnavailable() {
+        stubResponse("{\"result\":{\"userId\":\"user-2\",\"status\":\"ACTIVE\"}}");
+
+        assertThatThrownBy(() -> service.verifyPin("user-1", PIN))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_UPSTREAM_UNAVAILABLE);
+    }
+
+    @Test
+    @DisplayName("the PIN never appears in a log line")
+    void pinIsNeverLogged() {
+        Logger logger = (Logger) LoggerFactory.getLogger(CatalogueServiceImpl.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        Level original = logger.getLevel();
+        logger.setLevel(Level.ALL);
+        try {
+            when(restTemplate.exchange(anyString(), eq(HttpMethod.POST), any(), eq(JsonNode.class)))
+                    .thenThrow(HttpClientErrorException.create(HttpStatus.BAD_REQUEST,
+                            "bad request: pin=" + PIN, null, null, null));
+
+            assertThatThrownBy(() -> service.verifyPin("user-1", PIN)).isInstanceOf(CustomException.class);
+
+            assertThat(appender.list).isNotEmpty();
+            assertThat(appender.list)
+                    .as("a log line leaked the PIN")
+                    .noneMatch(event -> event.getFormattedMessage().contains(PIN));
         } finally {
             logger.setLevel(original);
             logger.detachAppender(appender);

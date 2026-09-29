@@ -18,6 +18,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @Service
@@ -62,15 +63,53 @@ public class AuthServiceImpl implements AuthService {
                         requiredText(tokenDetails, Constants.AUTH_FIELD_PASSWORD))
                 : requiredText(tokenDetails, Constants.AUTH_FIELD_USER_ID);
 
+        // pinLogin: enrol only after a verified password, and before issuing, so a failure returns nothing.
+        KeycloakService.DeviceEnrolment device = verified
+                && tokenDetails.path(Constants.AUTH_FIELD_PIN_LOGIN).asBoolean(false)
+                ? keycloakService.enrolDevice(userId, optionalText(tokenDetails, Constants.AUTH_FIELD_DEVICE_LABEL))
+                : null;
+
+        Map<String, Object> tokens = keycloakService.requestToken(userId);
+        indexSession(tokens);
+
+        CustomResponse response = new CustomResponse();
+        response.setResult(device == null ? tokens : withDevice(tokens, device));
+        success(response);
+        // The outcome names the path, so the audit shows whether the password was checked.
+        audit("auth_token_create", userId, verified ? "SUCCESS" : "SUCCESS_UNVERIFIED",
+                claimOf(tokens, CLAIM_FUNCTIONAL_ROLE));
+        return response;
+    }
+
+    /** PIN login: {deviceHandle, pin} -> the tokens a password login returns. Never log the body. */
+    @Override
+    public CustomResponse authTokenCreatePin(JsonNode tokenDetails) {
+        log.info("AuthServiceImpl::authTokenCreatePin");
+        String deviceHandle = requiredText(tokenDetails, Constants.AUTH_FIELD_DEVICE_HANDLE);
+        String pin = requiredText(tokenDetails, Constants.AUTH_FIELD_PIN);
+
+        String userId = keycloakService.claimPinAttempt(deviceHandle);
+        try {
+            catalogueService.verifyPin(userId, pin);
+        } catch (CustomException e) {
+            boolean wrongPin = Constants.AUTH_INVALID_CREDENTIALS.equals(e.getCode());
+            if (keycloakService.settlePinAttempt(deviceHandle,
+                    wrongPin ? KeycloakService.PinAttempt.WRONG : KeycloakService.PinAttempt.UNCHECKED)) {
+                // That was the fifth wrong PIN: the device is gone, so the user needs a password.
+                throw new CustomException(Constants.AUTH_TOKEN_REVOKED,
+                        Constants.AUTH_TOKEN_REVOKED_MSG, HttpStatus.UNAUTHORIZED);
+            }
+            throw e;
+        }
+        keycloakService.settlePinAttempt(deviceHandle, KeycloakService.PinAttempt.CORRECT);
+
         Map<String, Object> tokens = keycloakService.requestToken(userId);
         indexSession(tokens);
 
         CustomResponse response = new CustomResponse();
         response.setResult(tokens);
         success(response);
-        // The outcome names the path, so the audit shows whether the password was checked.
-        audit("auth_token_create", userId, verified ? "SUCCESS" : "SUCCESS_UNVERIFIED",
-                claimOf(tokens, CLAIM_FUNCTIONAL_ROLE));
+        audit("auth_token_create_pin", userId, "SUCCESS", claimOf(tokens, CLAIM_FUNCTIONAL_ROLE));
         return response;
     }
 
@@ -105,29 +144,37 @@ public class AuthServiceImpl implements AuthService {
     @Override
     public CustomResponse authUserCreate(JsonNode userDetails) {
         log.info("AuthServiceImpl::authUserCreate");
-        String userId = requiredText(userDetails, Constants.AUTH_FIELD_USER_ID);
-        // Required: without these, tokens carry a null org_id and tenant checks see "no org".
-        String orgId = requiredText(userDetails, Constants.AUTH_FIELD_ORG_ID);
-        String functionalRole = requiredText(userDetails, Constants.AUTH_FIELD_FUNCTIONAL_ROLE);
-        // Also required: the email is the login identifier the catalogue verifies a password
-        // against, so a user published without one could never authenticate.
-        String email = requiredText(userDetails, Constants.AUTH_FIELD_EMAIL);
-        String firstName = optionalText(userDetails, Constants.AUTH_FIELD_FIRST_NAME);
-        String lastName = optionalText(userDetails, Constants.AUTH_FIELD_LAST_NAME);
-        String orgName = optionalText(userDetails, Constants.AUTH_FIELD_ORG_NAME);
-        String displayName = optionalText(userDetails, Constants.AUTH_FIELD_DISPLAY_NAME);
+        KeycloakService.CatalogueUser user = catalogueUser(userDetails);
 
-        boolean created = keycloakService.upsertUser(new KeycloakService.CatalogueUser(
-                userId, orgId, functionalRole, email, firstName, lastName, orgName, displayName));
+        boolean created = keycloakService.upsertUser(user);
 
         CustomResponse response = new CustomResponse();
         Map<String, Object> result = new HashMap<>();
-        result.put(Constants.AUTH_FIELD_USER_ID, userId);
+        result.put(Constants.AUTH_FIELD_USER_ID, user.userId());
         result.put("created", created);
         result.put("enabled", true);
         response.setResult(result);
         success(response);
-        audit("auth_user_create", userId, created ? "USER_CREATED" : "USER_UPDATED", functionalRole);
+        audit("auth_user_create", user.userId(), created ? "USER_CREATED" : "USER_UPDATED",
+                user.functionalRole());
+        return response;
+    }
+
+    /** Syncs a catalogue edit: replaces the profile, never re-enables or clears the denylist. */
+    @Override
+    public CustomResponse authUserUpdate(JsonNode userDetails) {
+        log.info("AuthServiceImpl::authUserUpdate");
+        KeycloakService.CatalogueUser user = catalogueUser(userDetails);
+
+        keycloakService.replaceUser(user);
+
+        CustomResponse response = new CustomResponse();
+        Map<String, Object> result = new HashMap<>();
+        result.put(Constants.AUTH_FIELD_USER_ID, user.userId());
+        result.put("updated", true);
+        response.setResult(result);
+        success(response);
+        audit("auth_user_update", user.userId(), "USER_UPDATED", user.functionalRole());
         return response;
     }
 
@@ -236,6 +283,29 @@ public class AuthServiceImpl implements AuthService {
         success(response);
         audit("auth_user_revoke", userId, "USER_REVOKED", null);
         return response;
+    }
+
+    /** The body auth_user_create and auth_user_update share, so the two cannot drift apart. */
+    private KeycloakService.CatalogueUser catalogueUser(JsonNode userDetails) {
+        String userId = requiredText(userDetails, Constants.AUTH_FIELD_USER_ID);
+        // Required: without these, tokens carry a null org_id and tenant checks see "no org".
+        String orgId = requiredText(userDetails, Constants.AUTH_FIELD_ORG_ID);
+        String functionalRole = requiredText(userDetails, Constants.AUTH_FIELD_FUNCTIONAL_ROLE);
+        // Also required: the email is the login identifier the catalogue verifies against.
+        String email = requiredText(userDetails, Constants.AUTH_FIELD_EMAIL);
+        return new KeycloakService.CatalogueUser(userId, orgId, functionalRole, email,
+                optionalText(userDetails, Constants.AUTH_FIELD_FIRST_NAME),
+                optionalText(userDetails, Constants.AUTH_FIELD_LAST_NAME),
+                optionalText(userDetails, Constants.AUTH_FIELD_ORG_NAME),
+                optionalText(userDetails, Constants.AUTH_FIELD_DISPLAY_NAME));
+    }
+
+    /** Keycloak's response plus the enrolled device. A copy: Keycloak's map is left as returned. */
+    private Map<String, Object> withDevice(Map<String, Object> tokens, KeycloakService.DeviceEnrolment device) {
+        Map<String, Object> result = tokens == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tokens);
+        result.put(Constants.AUTH_FIELD_DEVICE_HANDLE, device.deviceHandle());
+        result.put(Constants.AUTH_FIELD_DEVICE_ID, device.deviceId());
+        return result;
     }
 
     /** A missing field would NPE into a 500; this makes it a 400. */

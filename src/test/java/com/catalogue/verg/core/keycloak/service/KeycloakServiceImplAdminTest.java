@@ -601,4 +601,61 @@ class KeycloakServiceImplAdminTest {
         assertThat(body.path("lastName").asText()).isEqualTo("Rao");
         assertThat(body.path("email").asText()).isEqualTo("a@b.example");
     }
+
+    // ── replace (auth_user_update) ─────────────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("replace sends no `enabled`, so editing a revoked user never re-enables them")
+    void replaceNeverReEnables() throws Exception {
+        stubUserLookup(existingUser(false));
+
+        service.replaceUser(userWith("asha@example.org", "Asha", null, null, "Asha R"));
+
+        JsonNode body = capturedBody(HttpMethod.PUT, "/users/" + KC_ID);
+        assertThat(body.has("enabled")).isFalse();
+        assertThat(body.has("username")).isFalse();
+        // ...and the denylist a revoke wrote is left exactly where it was.
+        verify(stringRedisTemplate, never()).delete(anyString());
+    }
+
+    @Test
+    @DisplayName("replace CLEARS omitted optional fields instead of carrying them forward")
+    void replaceClearsOmittedFields() throws Exception {
+        stubUserLookup(existingUserWithAttributes("Old Org", "Old Name"));
+
+        service.replaceUser(userWith("asha@example.org", "Asha", null, null, null));
+
+        JsonNode body = capturedBody(HttpMethod.PUT, "/users/" + KC_ID);
+        // A complete attributes object without the key is how Keycloak clears an attribute.
+        assertThat(body.path("attributes").has("org_name")).isFalse();
+        assertThat(body.path("attributes").has("display_name")).isFalse();
+        assertThat(body.path("attributes").path("org_id").path(0).asText()).isEqualTo(ORG_ID);
+        assertThat(body.has("lastName")).isFalse();
+        assertThat(body.path("firstName").asText()).isEqualTo("Asha");
+    }
+
+    @Test
+    @DisplayName("replace on a user that was never published is a 404 — an update must not create")
+    void replaceUnknownUserIsNotFound() {
+        stubUserLookup("[]");
+
+        assertThatThrownBy(() -> service.replaceUser(basicUser()))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_USER_NOT_FOUND)
+                .hasFieldOrPropertyWithValue("httpStatusCode", HttpStatus.NOT_FOUND);
+        verify(restTemplate, never()).exchange(anyString(), eq(HttpMethod.POST), any(), eq(String.class));
+        verify(restTemplate, never()).exchange(anyString(), eq(HttpMethod.PUT), any(), eq(String.class));
+    }
+
+    @Test
+    @DisplayName("replace with somebody else's email is a 409 conflict")
+    void replaceEmailConflictIsConflict() {
+        stubUserLookup(existingUser(true));
+        when(restTemplate.exchange(contains("/users/" + KC_ID), eq(HttpMethod.PUT), any(), eq(String.class)))
+                .thenThrow(HttpClientErrorException.create(HttpStatus.CONFLICT, "Conflict", null, null, null));
+
+        assertThatThrownBy(() -> service.replaceUser(userWithEmail("taken@example.org")))
+                .isInstanceOf(CustomException.class)
+                .hasFieldOrPropertyWithValue("code", Constants.AUTH_USER_CONFLICT);
+    }
 }

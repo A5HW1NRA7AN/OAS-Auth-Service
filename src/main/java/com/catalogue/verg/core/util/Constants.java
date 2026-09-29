@@ -28,6 +28,12 @@ public final class Constants {
     public static final String AUTH_FIELD_LAST_NAME = "lastName";
     public static final String AUTH_FIELD_ORG_NAME = "orgName";
     public static final String AUTH_FIELD_DISPLAY_NAME = "displayName";
+    // PIN login: the catalogue checks the PIN, and only together with the device handle.
+    public static final String AUTH_FIELD_PIN = "pin";
+    public static final String AUTH_FIELD_PIN_LOGIN = "pinLogin";
+    public static final String AUTH_FIELD_DEVICE_HANDLE = "deviceHandle";
+    public static final String AUTH_FIELD_DEVICE_ID = "deviceId";
+    public static final String AUTH_FIELD_DEVICE_LABEL = "deviceLabel";
 
     public static final String AUTH_INVALID_REQUEST = "AUTH_INVALID_REQUEST";
     public static final String AUTH_INVALID_REQUEST_MSG = "Request is missing a required field";

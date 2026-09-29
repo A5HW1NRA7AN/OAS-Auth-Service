@@ -9,11 +9,15 @@ public interface AuthService {
 
     CustomResponse authTokenRefresh(JsonNode tokenDetails);
 
+    CustomResponse authTokenCreatePin(JsonNode tokenDetails);
+
     CustomResponse authTokenValidate(JsonNode tokenDetails);
 
     CustomResponse authTokenInvalidate(JsonNode tokenDetails);
 
     CustomResponse authUserCreate(JsonNode userDetails);
+
+    CustomResponse authUserUpdate(JsonNode userDetails);
 
     CustomResponse authUserRevoke(JsonNode userDetails);
 

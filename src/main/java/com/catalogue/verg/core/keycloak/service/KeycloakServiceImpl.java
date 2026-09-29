@@ -31,11 +31,19 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriComponentsBuilder;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Date;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
@@ -62,6 +70,16 @@ public class KeycloakServiceImpl implements KeycloakService {
     private static final String SESSION_PREFIX = "auth:session:";
     private static final String USER_SESSIONS_PREFIX = "auth:user:";
     private static final String USER_SESSIONS_SUFFIX = ":sessions";
+
+    // PIN devices: keys hold the handle's SHA-256, never the handle; five wrong PINs remove one.
+    private static final String DEVICE_PREFIX = "auth:device:";
+    private static final String USER_DEVICES_SUFFIX = ":devices";
+    private static final String PIN_FAIL_PREFIX = "auth:pin:fail:";
+    static final int MAX_PIN_ATTEMPTS = 5;
+    /** 32 random bytes, Base64-URL without padding: 43 characters. */
+    private static final int DEVICE_HANDLE_BYTES = 32;
+    private static final int MAX_DEVICE_LABEL_LENGTH = 64;
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private static final long ADMIN_TOKEN_SKEW_SECONDS = 30;
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -283,13 +301,141 @@ public class KeycloakServiceImpl implements KeycloakService {
             }
             stringRedisTemplate.delete(indexKey);
 
-            log.info("KeycloakServiceImpl::revokeUser: revoked user_id={} and {} session(s)",
-                    userId, sids == null ? 0 : sids.size());
+            // Devices are deleted, not denylisted: upsertUser clears the user denylist on republish.
+            String devicesKey = userDevicesKey(userId);
+            List<Object> digests = stringRedisTemplate.opsForHash().values(devicesKey);
+            for (Object digest : digests) {
+                stringRedisTemplate.delete(List.of(DEVICE_PREFIX + digest, PIN_FAIL_PREFIX + digest));
+            }
+            stringRedisTemplate.delete(devicesKey);
+
+            log.info("KeycloakServiceImpl::revokeUser: revoked user_id={}, {} session(s), {} device(s)",
+                    userId, sids == null ? 0 : sids.size(), digests.size());
         } catch (Exception e) {
             log.error("KeycloakServiceImpl::revokeUser: Redis write failed — user NOT revoked", e);
             throw new CustomException(Constants.AUTH_REVOCATION_FAILED,
                     Constants.AUTH_REVOCATION_FAILED_MSG, HttpStatus.SERVICE_UNAVAILABLE);
         }
+    }
+
+    @Override
+    public DeviceEnrolment enrolDevice(String userId, String label) {
+        byte[] raw = new byte[DEVICE_HANDLE_BYTES];
+        RANDOM.nextBytes(raw);
+        String handle = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+        String digest = deviceDigest(handle);
+        String deviceId = UUID.randomUUID().toString();
+        long ttl = vergProperties.getPinDeviceTtlSeconds();
+
+        String device = MAPPER.createObjectNode()
+                .put(CLAIM_USER_ID, userId)
+                .put("device_id", deviceId)
+                .put("label", StringUtils.left(StringUtils.trimToNull(label), MAX_DEVICE_LABEL_LENGTH))
+                .put("created_at", Instant.now().toString())
+                .toString();
+        try {
+            stringRedisTemplate.opsForValue().set(DEVICE_PREFIX + digest, device, ttl, TimeUnit.SECONDS);
+            String devicesKey = userDevicesKey(userId);
+            stringRedisTemplate.opsForHash().put(devicesKey, deviceId, digest);
+            stringRedisTemplate.expire(devicesKey, ttl, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.error("KeycloakServiceImpl::enrolDevice: Redis write failed for {}", userId);
+            throw unreachable();
+        }
+        log.info("KeycloakServiceImpl::enrolDevice: enrolled device {} for {}", deviceId, userId);
+        return new DeviceEnrolment(handle, deviceId);
+    }
+
+    @Override
+    public String claimPinAttempt(String deviceHandle) {
+        String digest = deviceDigest(deviceHandle);
+        String failKey = PIN_FAIL_PREFIX + digest;
+        try {
+            JsonNode device = readDevice(digest);
+            if (device == null) {
+                // Unknown, expired, or removed after five failures; the caller cannot tell which.
+                throw invalidToken("unknown or expired PIN device");
+            }
+            // Spent before the check: an atomic INCR stops a parallel burst sharing one attempt.
+            long attempt = stringRedisTemplate.opsForValue().increment(failKey);
+            if (attempt == 1) {
+                stringRedisTemplate.expire(failKey, vergProperties.getPinDeviceTtlSeconds(), TimeUnit.SECONDS);
+            }
+            if (attempt > MAX_PIN_ATTEMPTS) {
+                forgetDevice(digest);
+                throw pinAttemptsExhausted();
+            }
+            return device.path(CLAIM_USER_ID).asText();
+        } catch (CustomException e) {
+            throw e;
+        } catch (Exception e) {
+            // Fail closed: the counter is the control, so an uncounted PIN is never checked.
+            log.error("KeycloakServiceImpl::claimPinAttempt: Redis unavailable — refusing the PIN login");
+            throw unreachable();
+        }
+    }
+
+    @Override
+    public boolean settlePinAttempt(String deviceHandle, PinAttempt outcome) {
+        String digest = deviceDigest(deviceHandle);
+        String failKey = PIN_FAIL_PREFIX + digest;
+        try {
+            switch (outcome) {
+                case CORRECT -> stringRedisTemplate.delete(failKey);
+                case UNCHECKED -> stringRedisTemplate.opsForValue().decrement(failKey);
+                case WRONG -> {
+                    String spent = stringRedisTemplate.opsForValue().get(failKey);
+                    if (spent != null && Long.parseLong(spent) >= MAX_PIN_ATTEMPTS) {
+                        forgetDevice(digest);
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Spent attempts stay spent, and the counter alone makes the next claim refuse.
+            log.warn("KeycloakServiceImpl::settlePinAttempt: could not settle a {} attempt", outcome);
+        }
+        return false;
+    }
+
+    /** The device record for a handle's digest, or null when there is none. */
+    private JsonNode readDevice(String digest) throws Exception {
+        String device = stringRedisTemplate.opsForValue().get(DEVICE_PREFIX + digest);
+        if (device == null) {
+            return null;
+        }
+        JsonNode node = MAPPER.readTree(device);
+        return StringUtils.isBlank(node.path(CLAIM_USER_ID).asText(null)) ? null : node;
+    }
+
+    /** Removes a device, its counter and index entry; best-effort, as the counter still refuses. */
+    private void forgetDevice(String digest) {
+        try {
+            JsonNode device = readDevice(digest);
+            stringRedisTemplate.delete(List.of(DEVICE_PREFIX + digest, PIN_FAIL_PREFIX + digest));
+            if (device != null) {
+                String userId = device.path(CLAIM_USER_ID).asText();
+                stringRedisTemplate.opsForHash().delete(userDevicesKey(userId), device.path("device_id").asText());
+                log.warn("KeycloakServiceImpl::forgetDevice: too many wrong PINs, device removed for {}", userId);
+            }
+        } catch (Exception e) {
+            log.error("KeycloakServiceImpl::forgetDevice: could not remove a PIN device");
+        }
+    }
+
+    /** SHA-256, not BCrypt: 256 random bits have no dictionary for a work factor to slow down. */
+    private String deviceDigest(String deviceHandle) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(deviceHandle.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required of every JVM", e);
+        }
+    }
+
+    private CustomException pinAttemptsExhausted() {
+        return new CustomException(Constants.AUTH_TOKEN_REVOKED,
+                Constants.AUTH_TOKEN_REVOKED_MSG, HttpStatus.UNAUTHORIZED);
     }
 
     /**
@@ -312,7 +458,7 @@ public class KeycloakServiceImpl implements KeycloakService {
             }
             try {
                 restTemplate.exchange(adminUsersUrl(), HttpMethod.POST,
-                        adminEntity(userPayload(user, true)), String.class);
+                        adminEntity(userPayload(user, true).toString()), String.class);
             } catch (HttpClientErrorException.Conflict e) {
                 // Either a concurrent publish of this user, or the email belongs to someone else.
                 // Only the first is recoverable; the second must surface as a 409.
@@ -358,8 +504,33 @@ public class KeycloakServiceImpl implements KeycloakService {
                 StringUtils.defaultIfBlank(user.displayName(), existingAttribute(existing, CLAIM_DISPLAY_NAME)));
 
         restTemplate.exchange(adminUsersUrl() + "/" + existing.path("id").asText(), HttpMethod.PUT,
-                adminEntity(userPayload(merged, false)), String.class);
+                adminEntity(userPayload(merged, false).toString()), String.class);
         clearUserDenylist(user.userId());
+    }
+
+    @Override
+    public void replaceUser(CatalogueUser user) {
+        String userId = user.userId();
+        try {
+            JsonNode existing = findUser(userId);
+            if (existing == null) {
+                throw new CustomException(Constants.AUTH_USER_NOT_FOUND,
+                        Constants.AUTH_USER_NOT_FOUND_MSG, HttpStatus.NOT_FOUND);
+            }
+            // No merge, so omitted fields clear; no `enabled`, so an edit never un-revokes.
+            ObjectNode payload = userPayload(user, false);
+            payload.remove("enabled");
+            restTemplate.exchange(adminUsersUrl() + "/" + existing.path("id").asText(), HttpMethod.PUT,
+                    adminEntity(payload.toString()), String.class);
+            log.info("KeycloakServiceImpl::replaceUser: replaced {}", userId);
+        } catch (CustomException e) {
+            throw e;
+        } catch (HttpStatusCodeException e) {
+            throw adminFailure("replaceUser", userId, e);
+        } catch (RestClientException e) {
+            log.error("KeycloakServiceImpl::replaceUser: Keycloak unreachable", e);
+            throw unreachable();
+        }
     }
 
     /**
@@ -451,7 +622,7 @@ public class KeycloakServiceImpl implements KeycloakService {
     }
 
     /** Jackson, not concatenation: a quote in an email would emit broken JSON. No credentials. */
-    private String userPayload(CatalogueUser catalogueUser, boolean create) {
+    private ObjectNode userPayload(CatalogueUser catalogueUser, boolean create) {
         ObjectNode user = MAPPER.createObjectNode();
         if (create) {
             // Read-only once set; sending it on an update is at best a no-op and at worst a 400.
@@ -484,7 +655,7 @@ public class KeycloakServiceImpl implements KeycloakService {
         if (StringUtils.isNotBlank(catalogueUser.displayName())) {
             attributes.putArray(CLAIM_DISPLAY_NAME).add(catalogueUser.displayName());
         }
-        return user.toString();
+        return user;
     }
 
     /**
@@ -691,6 +862,10 @@ public class KeycloakServiceImpl implements KeycloakService {
 
     private String userSessionsKey(String userId) {
         return USER_SESSIONS_PREFIX + userId + USER_SESSIONS_SUFFIX;
+    }
+
+    private String userDevicesKey(String userId) {
+        return USER_SESSIONS_PREFIX + userId + USER_DEVICES_SUFFIX;
     }
 
     private String realmUrl() {

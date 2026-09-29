@@ -48,4 +48,11 @@ public class VergProperties {
 
     @Value("${catalogue.verify-path}")
     private String catalogueVerifyPath;
+
+    @Value("${catalogue.verify-pin-path}")
+    private String catalogueVerifyPinPath;
+
+    /** Absolute life of a PIN device; after it the user must log in with a password. */
+    @Value("${pin.device-ttl-seconds}")
+    private long pinDeviceTtlSeconds;
 }
