@@ -474,15 +474,16 @@ The order is:
 1. Create User
 2. Read User
 3. Verify Credentials
-4. Create Token, then Create Token (PIN enrolment) and Create Token with PIN
+4. Create Token, then Create Token (PIN enrolment), Create Token with PIN, and its wrong-PIN variant
 5. Refresh Token
 6. Validate Token
 7. Invalidate Token
 8. Update User
 9. Revoke User
 10. Enable User
-11. Delete User
-12. Delete Catalogue Record
+11. Toggle User (the catalogue's toggle; run twice to deactivate, then reactivate)
+12. Delete User
+13. Delete Catalogue Record
 
 Paste the `PASTE_USER_ID`, `PASTE_ACCESS_TOKEN`, `PASTE_REFRESH_TOKEN` and `PASTE_DEVICE_HANDLE` values
 by hand. Re-running Validate or Create Token between the later steps shows each transition: `401`
